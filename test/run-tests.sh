@@ -451,6 +451,23 @@ if command -v systemd-analyze >/dev/null 2>&1; then
   check $? "systemd accepts the generated service"
 fi
 
+# A pre_command that starts a systemd unit which does not exist fails every
+# run. install catches that before anything is written -- the refusal has to
+# name the unit and leave nothing half-installed.
+jq '.destinations[0].pre_command = "systemctl --user start mount-backup-disk"' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
+OUT="$($CLI install 2>&1)"
+grep -q "mount-backup-disk" <<<"$OUT" && grep -q "which does not exist" <<<"$OUT"
+check $? "install refuses a pre_command that names a missing unit"
+cp "$WORK/config.bak" "$CONFIG"
+
+# The backup cannot read what the user cannot. install names those
+# directories before the first run finds out with a half-failed snapshot.
+mkdir -p "$WORK/src/secret" && chmod 000 "$WORK/src/secret"
+OUT="$($CLI install 2>&1)"
+grep -q "will not be able to read" <<<"$OUT" && grep -q "secret" <<<"$OUT"
+check $? "install names unreadable source directories before the first run"
+chmod 755 "$WORK/src/secret"
+
 # The schedule and its delay are interpolated verbatim into the unit file, and
 # unit files are parsed line by line: a newline in either value would inject
 # whatever follows as unit directives, and install enables the unit without

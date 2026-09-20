@@ -508,7 +508,7 @@ restic_context() {
 
   [ -n "$password_file" ] || password_file="$CONFIG_DIR/$DEST_NAME.key"
   user_file "$password_file" ||
-    die "no key file at $password_file, run: omarchy-time-machine key set --dest $DEST_NAME"
+    die "no key file at $password_file, run: omarchy-time-machine key set --dest $DEST_NAME, or set password_command in the config if the destination fetches its own password"
   chmod 600 -- "$password_file" 2>/dev/null
   export RESTIC_PASSWORD_FILE="$password_file"
   return 0
@@ -690,6 +690,18 @@ validate_absolute_path() {
 # ---------------------------------------------------------------------------
 
 key_warning() {
+  if [ -n "$(dest '.password_command // empty' 2>/dev/null)" ]; then
+    cat <<'TEXT'
+── Where this password lives ───────────────────────────────────────
+This destination fetches its password with password_command, so there
+is no key file to save anywhere. The password lives wherever that
+command gets it -- in pass, your existing secret store. The recovery
+plan for this backup is whatever discipline you already have for that
+store.
+────────────────────────────────────────────────────────────────────
+TEXT
+    return 0
+  fi
   cat <<'TEXT'
 ── Keep a copy of this key somewhere else ──────────────────────────
 The key file lives in your home directory, and your home directory
@@ -810,6 +822,7 @@ cmd_key() {
       # never says where the password lives -- you have to know the rule. After
       # this the file states it, and nothing is implicit any more.
       if [ -z "$(dest '.password_file // empty')" ]; then
+        cp -- "$CONFIG_FILE" "$CONFIG_FILE.bak" 2>/dev/null || true
         jq --arg n "$DEST_NAME" --arg p "$path" \
           '(.destinations[] | select(.name == $n) | .password_file) = $p' <<<"$CONFIG_JSON" \
           | write_private "$CONFIG_FILE" || die "could not record password_file in $CONFIG_FILE"
@@ -1002,6 +1015,7 @@ cmd_init() {
   restic_run init || return 1
   printf '\n'
   key_warning
+  printf 'Now run: omarchy-time-machine install to switch on the schedule.\n'
 }
 
 cmd_check() {
@@ -1216,7 +1230,8 @@ cmd_backup() {
       # the next clean run clears the backlog.
       reason="$(unreadable_reason)"
       [ -n "$reason" ] || reason="some files could not be read"
-      log_line "Backup failed: $reason"
+      log_line "Backup finished with gaps: $reason"
+      log_line "A snapshot was still written and covers everything readable -- fix the cause and the next run goes green."
       # Beats restic's own "at least one source file could not be read", which
       # is what exit_error already wrote here and which names nothing.
       printf '%s' "$reason" > "$ERROR_FILE"
@@ -1800,6 +1815,41 @@ write_unit() {
 cmd_install() {
   load_config
   mkdir -p -- "$SYSTEMD_DIR"
+
+  # Name the source directories the backup will not be able to read, before
+  # the first run finds out the hard way with a half-failed snapshot. A
+  # warning, not a refusal: everything readable still gets backed up, and
+  # the directories might be somebody else's problem to fix.
+  unreadable=""
+  while IFS= read -r src; do
+    [ -n "$src" ] || continue
+    src="$(expand_tilde "$src")"
+    [ -d "$src" ] || continue
+    found="$(find "$src" -type d \! -readable 2>/dev/null | head -5)"
+    if [ -n "$found" ]; then
+      unreadable="$unreadable$found
+"
+    fi
+  done < <(cfg 'if (.source | type) == "array" then .source[] else (.source // empty) end' 2>/dev/null)
+  if [ -n "$unreadable" ]; then
+    printf 'Warning: the backup will not be able to read:\n%s' "$unreadable"
+    printf 'Everything readable still gets backed up, but runs with unreadable files count as failed.\n'
+    printf 'An ACL fixes it without touching ownership: setfacl -R -m u:%s:rX <dir> (plus -d for future files), or exclude the directory.\n\n' "$USER"
+  fi
+
+  # A pre_command that starts a systemd unit which does not exist fails every
+  # run. Catch that at install time, where fixing it is cheap, instead of at
+  # 3am or on the first manual run. Checked for every scheduled destination
+  # before anything is written, so a refusal leaves nothing half-installed.
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ -n "$(jq -r --arg n "$name" '.destinations[] | select(.name==$n) | .schedule // ""' <<<"$CONFIG_JSON")" ] || continue
+    pc="$(jq -r --arg n "$name" '.destinations[] | select(.name==$n) | .pre_command // ""' <<<"$CONFIG_JSON")"
+    unit_name="$(printf '%s' "$pc" | sed -n 's/^systemctl --user \(start\|restart\) \([^[:space:]]*\).*/\2/p')"
+    if [ -n "$unit_name" ] && ! systemctl --user cat "$unit_name" >/dev/null 2>&1; then
+      die "pre_command of $name starts $unit_name, which does not exist -- create the unit or change pre_command (an fstab automount needs no unit at all; see the README)"
+    fi
+  done < <(cfg '.destinations[].name')
 
   printf 'Writing units into %s:\n' "$SYSTEMD_DIR"
   write_unit "omarchy-time-machine@.service" "$(service_unit)"
