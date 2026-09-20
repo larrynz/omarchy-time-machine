@@ -85,6 +85,16 @@ omarchy-time-machine install
 
 Those three lines set the password, prepare the destination, and switch on the nightly schedule. That's the setup done. Go do something else.
 
+This password encrypts only the backup contents. It is not where API keys or storage credentials go -- those belong in the per-destination env file, or in whatever secret store you already use. And it is not one password for everything: every destination has its own.
+
+If you would rather restic fetch this password from somewhere other than the local key file, set `password_command` or `password_file` in the config -- never both -- and the key file is not used at all:
+
+```json
+{ "name": "backup-drive", "password_command": "pass show omarchy/backup-drive" }
+```
+
+If your secrets live in `pass`, that line is the whole setup: pass handles the gpg underneath, and every backup picks the password up straight from your store. `key set` refuses a destination that uses `password_command`, because a key file would do nothing there -- and the password's recovery plan becomes whatever discipline you already have for that store. One operational caveat: a scheduled run has no terminal to prompt in, so the command has to answer without asking -- keep the gpg passphrase cached or set up loopback pinentry, or the run stops with an error instead of hanging.
+
 ## Now save that password somewhere else
 
 Read this bit. It's the one thing that quietly makes backups worthless.
@@ -104,6 +114,12 @@ omarchy-time-machine key save-1password --dest backup-drive
 ```
 
 That writes it into your vault as "Time Machine backup key (backup-drive)", with a note saying which destination it opens. It refuses if an item by that name already exists, because two of them is how you end up trying the wrong one in a year.
+
+And if your password manager is `pass`, the same one-liner:
+
+```bash
+omarchy-time-machine key show --dest backup-drive | pass insert -m omarchy/backup-drive
+```
 
 ### Credentials beyond the password
 

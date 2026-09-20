@@ -343,6 +343,25 @@ grep -q "pick one" <<<"$OUT"
 check $? "setting both password sources is refused rather than silently resolved"
 cp "$WORK/config.bak" "$CONFIG"
 
+# The other half of that rule: a destination that fetches its own password
+# works with no key file and no password_file -- which is what proves restic
+# is reading it from the command. key set recorded password_file in the
+# config earlier, so the test deletes it; leaving it set would trip the
+# exclusivity check instead of exercising the command.
+jq '.destinations[0].password_command = "echo test-password"
+    | del(.destinations[0].password_file)' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
+rm -f "$XDG_CONFIG_HOME/omarchy-time-machine/test.key"
+$CLI backup --dest test >/dev/null 2>&1
+[ "$?" = "0" ]
+check $? "a password_command feeds restic with no key file present"
+
+$CLI key set --dest test </dev/null 2>/dev/null
+[ "$?" != "0" ]
+check $? "and key set refuses a destination that fetches its own"
+
+cp "$WORK/config.bak" "$CONFIG"
+printf 'test-password\n' | $CLI key set --dest test >/dev/null 2>&1
+
 jq '.exclude_file = "/nope/missing.txt"' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
 $CLI backup --dest test >/dev/null 2>&1
 [ "$(find "$XDG_STATE_HOME/omarchy-time-machine" -maxdepth 1 -name '.summary.*' | wc -l)" = "0" ]
