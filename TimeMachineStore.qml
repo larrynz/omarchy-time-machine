@@ -337,6 +337,56 @@ Singleton {
 
   Process { id: logProc }
 
+  // --- guided setup ---------------------------------------------------------
+
+  // The setup screen runs one command: apply-setup reads its document on
+  // stdin, validates it against the same rules the units will get, and does
+  // everything a first run needs -- config, key, repository, timers. The
+  // password travels inside the document, on stdin, never on a command line:
+  // a command line is readable by any process on the machine, stdin is not.
+  // write() drops its data when the process is not running yet, so the
+  // document is written on the started signal, not before.
+  property bool setupBusy: false
+  property string setupError: ""
+  property string setupDone: ""
+  property string setupPendingDoc: ""
+
+  function applySetup(doc) {
+    if (setupBusy) return
+    setupBusy = true
+    setupError = ""
+    setupDone = ""
+    setupPendingDoc = JSON.stringify(doc)
+    applyProc.command = [root.cli, "apply-setup"]
+    applyProc.running = true
+  }
+
+  Process {
+    id: applyProc
+    onStarted: write(setupPendingDoc)
+    stdout: StdioCollector {
+      onStreamFinished: {
+        // The install step prints systemctl's timer table, which wrapped at
+        // panel width is unreadable. Keep the lines that say what happened,
+        // drop the table, keep the final line that says it worked.
+        var t = text
+        var i = t.indexOf("Next run:")
+        if (i !== -1) {
+          var j = t.indexOf("Setup complete")
+          t = t.substring(0, i) + (j !== -1 ? t.substring(j) : "")
+        }
+        root.setupDone = t.trim()
+      }
+    }
+    stderr: StdioCollector {
+      onStreamFinished: if (text !== "") root.setupError = text
+    }
+    onFinished: function(exitCode, exitStatus) {
+      root.setupBusy = false
+      root.refresh()
+    }
+  }
+
   // --- snapshots ----------------------------------------------------------
 
   // Which destination the restore browser is looking at. Separate from

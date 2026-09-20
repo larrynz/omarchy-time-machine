@@ -32,6 +32,13 @@ Panel {
   // lose keyboard focus on Wayland the moment the first one closed.
   property bool browsing: false
 
+  // The guided first run. Separate from browsing: browsing is reading history
+  // and hands the keyboard to the listing, setting up is typing and hands it
+  // to the form.
+  property bool settingUp: false
+  property string setupValidationError: ""
+  property string setupSchedule: "daily"
+
   readonly property color barIconColor: {
     if (TimeMachineStore.running) return accent
     if (TimeMachineStore.failed) return urgent
@@ -72,6 +79,7 @@ Panel {
   onOpenedChanged: {
     if (!opened) {
       root.browsing = false
+      root.settingUp = false
       return
     }
     TimeMachineStore.refresh()
@@ -81,7 +89,12 @@ Panel {
   // listing has to take it, and give it back on the way out.
   onBrowsingChanged: {
     if (browsing) browser.takeFocus()
-    else keyCatcher.forceActiveFocus()
+    else if (!settingUp) keyCatcher.forceActiveFocus()
+  }
+
+  onSettingUpChanged: {
+    if (settingUp) setupName.forceActiveFocus()
+    else if (!browsing) keyCatcher.forceActiveFocus()
   }
 
   BarIconButton {
@@ -166,11 +179,14 @@ Panel {
     // fittedContentWidth inside the binding: that form evaluates once at open
     // and never re-runs, so the panel would keep the width of whichever view
     // happened to be showing when it opened.
-    readonly property int desiredWidth: Style.space(root.browsing ? 460 : 280)
+    readonly property int desiredWidth:
+      Style.space(root.browsing ? 460 : (root.settingUp ? 420 : 280))
     contentWidth: Math.min(desiredWidth,
                            panel.availableCardWidth > 0 ? panel.availableCardWidth : desiredWidth)
     contentHeight: panel.fittedContentHeight(
-                     root.browsing ? browser.implicitHeight : mainColumn.implicitHeight,
+                     root.browsing ? browser.implicitHeight
+                                   : (root.settingUp ? setupColumn.implicitHeight
+                                                     : mainColumn.implicitHeight),
                      Style.space(560))
 
     PanelKeyCatcher {
@@ -183,7 +199,7 @@ Panel {
       // listing is impossible under it; any word containing one of those
       // letters would steer the panel instead. While browsing the listing
       // handles its own keys.
-      blocked: root.browsing
+      blocked: root.browsing || root.settingUp
 
       // ConfirmDialog handles the mouse itself but nothing else: without this
       // an open dialog would swallow Escape and Enter, and the only way out
@@ -194,6 +210,7 @@ Panel {
         else if (root.browsing && browser.confirmOpen) browser.confirmCancel()
         else if (root.browsing && browser.filter !== "") browser.clearFilter()
         else if (root.browsing) root.browsing = false
+        else if (root.settingUp) root.settingUp = false
         else root.close()
       }
 
@@ -260,7 +277,7 @@ Panel {
             bottomPadding: visible ? Style.space(8) : 0
             text: {
               if (TimeMachineStore.configInvalid) return TimeMachineStore.configError
-              if (!TimeMachineStore.configured) return "Create one below and it opens in your editor"
+              if (!TimeMachineStore.configured) return "Set one up below and the panel walks you through it"
               return ""
             }
             textFormat: Text.PlainText
@@ -427,14 +444,16 @@ Panel {
           MenuRow {
             width: parent.width
             label: (TimeMachineStore.configured || TimeMachineStore.configInvalid)
-                   ? "Open Configuration\u2026" : "Create Configuration\u2026"
+                   ? "Open Configuration\u2026" : "Set Up Backups\u2026"
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: {
-              if (TimeMachineStore.configured || TimeMachineStore.configInvalid)
+              if (TimeMachineStore.configured || TimeMachineStore.configInvalid) {
                 TimeMachineStore.openConfig()
-              else TimeMachineStore.createConfig()
-              root.close()
+                root.close()
+              } else {
+                root.settingUp = true
+              }
             }
           }
         }
@@ -452,6 +471,257 @@ Panel {
         urgent: root.urgent
         fontFamily: root.fontFamily
         onBack: root.browsing = false
+      }
+
+      // --- setup view --------------------------------------------------------
+
+      // The guided first run. The old path was "open config.json in your
+      // editor", which is how all six setup snags happened: each was caught
+      // too late or pointed at the wrong fix. This form asks the same
+      // questions where the user is, and runs one command that validates
+      // everything against the same rules the units will get and refuses
+      // loudly before anything is written.
+      Flickable {
+        id: setupScroll
+        anchors.fill: parent
+        visible: root.settingUp
+        contentWidth: width
+        contentHeight: setupColumn.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        Column {
+          id: setupColumn
+          width: setupScroll.width
+          spacing: 0
+
+          Text {
+            width: parent.width
+            bottomPadding: Style.space(8)
+            text: "Set up backups"
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            width: parent.width
+            bottomPadding: Style.space(8)
+            text: "One destination, one repository, one schedule. The password is stored in a 600 file next to the configuration, never in the configuration itself."
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: root.dimmer
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            width: parent.width
+            bottomPadding: Style.space(2)
+            text: "Name"
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          TextField {
+            id: setupName
+            width: parent.width
+            placeholderText: "backup"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            color: root.foreground
+            placeholderTextColor: root.dimmer
+            selectByMouse: true
+            background: Rectangle {
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+              radius: Style.space(4)
+              border.width: 1
+              border.color: setupName.activeFocus ? root.accent
+                            : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+            }
+          }
+
+          Text {
+            width: parent.width
+            topPadding: Style.space(6)
+            bottomPadding: Style.space(2)
+            text: "Repository"
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          TextField {
+            id: setupRepo
+            width: parent.width
+            placeholderText: "/run/media/\u2026/restic"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            color: root.foreground
+            placeholderTextColor: root.dimmer
+            selectByMouse: true
+            background: Rectangle {
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+              radius: Style.space(4)
+              border.width: 1
+              border.color: setupRepo.activeFocus ? root.accent
+                            : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+            }
+          }
+
+          Text {
+            width: parent.width
+            topPadding: Style.space(6)
+            bottomPadding: Style.space(2)
+            text: "Password"
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          TextField {
+            id: setupPassword
+            width: parent.width
+            echoMode: TextInput.Password
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            color: root.foreground
+            selectByMouse: true
+            background: Rectangle {
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+              radius: Style.space(4)
+              border.width: 1
+              border.color: setupPassword.activeFocus ? root.accent
+                            : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+            }
+          }
+
+          Text {
+            width: parent.width
+            topPadding: Style.space(6)
+            bottomPadding: Style.space(2)
+            text: "Schedule"
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          MenuRow {
+            width: parent.width
+            label: setupSchedule + " \u2014 click to change"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: {
+              var presets = ["daily", "weekly", "monthly", "hourly", "manual"]
+              var i = presets.indexOf(setupSchedule)
+              setupSchedule = presets[(i + 1) % presets.length]
+            }
+          }
+
+          PanelSeparator { width: parent.width; foreground: root.foreground }
+
+          Text {
+            width: parent.width
+            visible: root.setupValidationError !== ""
+            topPadding: visible ? Style.space(6) : 0
+            bottomPadding: visible ? Style.space(6) : 0
+            text: root.setupValidationError
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            width: parent.width
+            visible: TimeMachineStore.setupError !== ""
+            topPadding: visible ? Style.space(6) : 0
+            bottomPadding: visible ? Style.space(6) : 0
+            text: TimeMachineStore.plain(TimeMachineStore.setupError)
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            width: parent.width
+            visible: TimeMachineStore.setupBusy
+            topPadding: Style.space(4)
+            bottomPadding: Style.space(4)
+            text: "Applying \u2014 creating the repository and switching on the schedule\u2026"
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            width: parent.width
+            visible: !TimeMachineStore.setupBusy && TimeMachineStore.setupDone !== ""
+                     && root.setupValidationError === "" && TimeMachineStore.setupError === ""
+            text: TimeMachineStore.plain(TimeMachineStore.setupDone)
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          MenuRow {
+            width: parent.width
+            label: "Apply"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: {
+              if (TimeMachineStore.setupBusy) return
+              var name = setupName.text.trim()
+              var repo = setupRepo.text.trim()
+              if (name === "" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+                root.setupValidationError =
+                  "Name must start with a letter or digit, and contain only letters, digits, dashes, dots and underscores"
+                return
+              }
+              if (repo === "") {
+                root.setupValidationError = "A repository path is required"
+                return
+              }
+              if (setupPassword.text === "") {
+                root.setupValidationError =
+                  "A password is required \u2014 it is stored in a 600 file, never in the configuration"
+                return
+              }
+              root.setupValidationError = ""
+              TimeMachineStore.applySetup({
+                name: name,
+                display_name: name,
+                repository: repo,
+                schedule: setupSchedule,
+                password: setupPassword.text
+              })
+            }
+          }
+
+          MenuRow {
+            width: parent.width
+            label: "Cancel"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.settingUp = false
+          }
+        }
       }
     }
 

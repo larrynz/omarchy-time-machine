@@ -772,6 +772,60 @@ $CLI demo off >/dev/null 2>&1
 [ "$($CLI status --json | jq -r '[.destinations[].name] | join(",")')" = "test" ]
 check $? "turning demo off restores the real configuration"
 
+# --- guided setup ------------------------------------------------------------
+
+group "apply-setup"
+
+# The whole first-run path in one command: a setup document on stdin becomes
+# a merged config.json, a 600 key file, a created repository and enabled
+# units. install exits non-zero under the redirected XDG_CONFIG_HOME, so what
+# is under test is the output, not the exit status.
+OUT="$(printf '%s' '{"name":"setup-test","display_name":"Setup test","repository":"'"$WORK"'/setup-repo","schedule":"daily","password":"setup-password"}' | $CLI apply-setup 2>&1)"
+grep -q "Key written to" <<<"$OUT"
+check $? "apply-setup installs the key from the document"
+grep -q "Repository created" <<<"$OUT"
+check $? "apply-setup creates the repository"
+[ "$(stat -c %a "$XDG_CONFIG_HOME/omarchy-time-machine/setup-test.key")" = "600" ]
+check $? "the key file is 600"
+[ -f "$XDG_CONFIG_HOME/systemd/user/omarchy-time-machine@setup-test.timer" ]
+check $? "apply-setup writes the timer"
+jq -e '.destinations[] | select(.name == "setup-test")' "$XDG_CONFIG_HOME/omarchy-time-machine/config.json" >/dev/null
+check $? "apply-setup merges the destination into config.json"
+
+# Applying twice corrects instead of duplicating: the repository already
+# exists, the destination is replaced by name.
+OUT="$(printf '%s' '{"name":"setup-test","repository":"'"$WORK"'/setup-repo","schedule":"daily","password":"setup-password"}' | $CLI apply-setup 2>&1)"
+grep -q "already exists" <<<"$OUT"
+check $? "a second apply keeps the repository"
+[ "$(jq '.destinations | map(select(.name == "setup-test")) | length' "$XDG_CONFIG_HOME/omarchy-time-machine/config.json")" = "1" ]
+check $? "a second apply does not duplicate the destination"
+
+# Malformed JSON, a newline in the repository, a newline in the schedule, a
+# name with a space and a destination with no password are all refused with a
+# message, before anything the user would have to untangle is written.
+OUT="$(printf '%s' '{oops' | $CLI apply-setup 2>&1)"
+grep -q "not valid JSON" <<<"$OUT"
+check $? "apply-setup refuses malformed JSON"
+
+OUT="$(printf '%s' '{"name":"x","repository":"a\nb"}' | $CLI apply-setup 2>&1)"
+grep -q "newline" <<<"$OUT"
+check $? "apply-setup refuses a newline in the repository"
+
+OUT="$(printf '%s' '{"name":"x","repository":"/tmp/r","schedule":"daily\nrm"}' | $CLI apply-setup 2>&1)"
+grep -q "calendar" <<<"$OUT"
+check $? "apply-setup refuses a newline in the schedule"
+
+OUT="$(printf '%s' '{"name":"two words","repository":"/tmp/r"}' | $CLI apply-setup 2>&1)"
+grep -q "name must" <<<"$OUT"
+check $? "apply-setup refuses a name with a space"
+
+OUT="$(printf '%s' '{"name":"nopass","repository":"'"$WORK"'/nopass-repo"}' | $CLI apply-setup 2>&1)"
+grep -q "no password" <<<"$OUT"
+check $? "apply-setup refuses a destination with no password"
+
+cp "$WORK/config.bak" "$CONFIG"
+$CLI install >/dev/null 2>&1 || true
+
 # --- result ----------------------------------------------------------------
 
 if [ "$SKIPPED" -gt 0 ]; then

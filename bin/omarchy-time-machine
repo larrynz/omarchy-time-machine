@@ -279,10 +279,13 @@ declare -a POSITIONAL=()
 
 parse_options() {
   OPT_DEST=""; OPT_SNAPSHOT=""; OPT_PATH=""; OPT_TARGET=""; OPT_VAULT=""; OPT_DRY_RUN=0; OPT_JSON=0
+  OPT_FILE=""; OPT_PASSWORD_FILE=""
   POSITIONAL=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --dest) OPT_DEST="${2:-}"; shift 2 || shift ;;
+      --file) OPT_FILE="${2:-}"; shift 2 || shift ;;
+      --password-file) OPT_PASSWORD_FILE="${2:-}"; shift 2 || shift ;;
       --snapshot) OPT_SNAPSHOT="${2:-}"; shift 2 || shift ;;
       --path) OPT_PATH="${2:-}"; shift 2 || shift ;;
       --target) OPT_TARGET="${2:-}"; shift 2 || shift ;;
@@ -1678,7 +1681,23 @@ cmd_config() {
   fi
 
   config_dir_secure
-  cat <<'JSON' | write_private "$CONFIG_FILE" || die "could not write $CONFIG_FILE"
+  starter_config | write_private "$CONFIG_FILE" || die "could not write $CONFIG_FILE"
+
+  printf 'Wrote a starter configuration to %s\n' "$CONFIG_FILE" >&2
+  printf 'Point "repository" at your drive, then run:\n' >&2
+  printf '  omarchy-time-machine key set --dest backup-drive\n' >&2
+  printf '  omarchy-time-machine init --dest backup-drive\n' >&2
+  printf '  omarchy-time-machine install\n' >&2
+  printf '%s\n' "$CONFIG_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# guided setup
+# ---------------------------------------------------------------------------
+
+# The starter configuration, shared by `config create` and `apply-setup`.
+starter_config() {
+  cat <<'JSON'
 {
   "source": "~",
   "retention": { "daily": 7, "weekly": 4, "monthly": 12, "yearly": 3 },
@@ -1692,13 +1711,145 @@ cmd_config() {
   ]
 }
 JSON
+}
 
-  printf 'Wrote a starter configuration to %s\n' "$CONFIG_FILE" >&2
-  printf 'Point "repository" at your drive, then run:\n' >&2
-  printf '  omarchy-time-machine key set --dest backup-drive\n' >&2
-  printf '  omarchy-time-machine init --dest backup-drive\n' >&2
-  printf '  omarchy-time-machine install\n' >&2
-  printf '%s\n' "$CONFIG_FILE"
+# Schedule presets for the setup screen: short words a person can cycle
+# through, expanded to the calendar expressions the units use. Anything else
+# falls through to the systemd-analyze check, so a hand-typed spec still
+# works and a typo still refuses.
+apply_setup_preset() {
+  case "$1" in
+    hourly)  printf '*-*-* *:00:00' ;;
+    daily)   printf '*-*-* 03:00:00' ;;
+    weekly)  printf 'Mon *-*-* 03:00:00' ;;
+    monthly) printf '*-*-01 03:00:00' ;;
+    *) return 1 ;;
+  esac
+}
+
+# One command for a setup screen. Takes a small JSON document on stdin:
+#   {"name": "backup", "repository": "/mnt/x/restic", "schedule": "daily",
+#    "display_name": "Backup", "password": "..."}
+# Validates it against the same rules the units will get, merges it into
+# config.json -- replacing any destination of the same name, so applying
+# twice corrects instead of duplicating -- installs the key, creates the
+# repository, and switches on the schedule. The password arrives on stdin,
+# never on a command line: a command line is readable by any process on the
+# machine, stdin is not.
+cmd_apply_setup() {
+  parse_options "$@"
+
+  local doc
+  if [ -n "$OPT_FILE" ]; then
+    user_file "$OPT_FILE" || die "could not read $OPT_FILE"
+    doc="$(cat -- "$OPT_FILE")"
+  else
+    doc="$(cat)"
+  fi
+
+  # One jq parse before any field check: malformed JSON is refused here,
+  # with a message, instead of producing a half-written config.
+  doc="$(printf '%s' "$doc" | jq -c .)" || die "the setup document is not valid JSON"
+
+  local name display_name repository schedule preset
+  name="$(jq -r '.name // ""' <<<"$doc")"
+  [ -n "$name" ] || die "the setup document has no name"
+  case "$name" in
+    *[$'\n\r']*) die "name contains a newline" ;;
+  esac
+  jq -en --arg n "$name" '$n | test("^[A-Za-z0-9][A-Za-z0-9._-]*$")' >/dev/null 2>&1 \
+    || die "name must start with a letter or digit, and contain only letters, digits, dashes, dots and underscores"
+
+  repository="$(jq -r '.repository // ""' <<<"$doc")"
+  [ -n "$repository" ] || die "the setup document has no repository"
+  case "$repository" in
+    *[$'\n\r']*)
+      die "repository contains a newline; refusing to write it into a unit file" ;;
+  esac
+
+  display_name="$(jq -r '.display_name // ""' <<<"$doc")"
+  display_name="$(printf '%s' "$display_name" | tr -d '\r\n')"
+  [ -n "$display_name" ] || display_name="$name"
+
+  schedule="$(jq -r '.schedule // ""' <<<"$doc")"
+  if [ -n "$schedule" ] && [ "$schedule" != "manual" ]; then
+    if preset="$(apply_setup_preset "$schedule")"; then
+      schedule="$preset"
+    else
+      check_unit_values "$name" "$schedule" ""
+    fi
+  else
+    schedule=""
+  fi
+
+  # The starter configuration when there is nothing yet, the real one
+  # otherwise. On a fresh start the placeholder destination is replaced
+  # outright -- it only exists to be pointed somewhere, and leaving it in
+  # place means the panel lists a destination that cannot work.
+  local fresh=0
+  if ! user_file "$CONFIG_FILE"; then
+    config_dir_secure
+    starter_config | write_private "$CONFIG_FILE" || die "could not write $CONFIG_FILE"
+    fresh=1
+  fi
+  load_config
+
+  local obj
+  obj="$(jq -cn --arg n "$name" --arg dn "$display_name" --arg r "$repository" --arg s "$schedule" \
+    '{name: $n, display_name: $dn, repository: $r} + (if $s == "" then {} else {schedule: $s} end)')"
+  if [ "$fresh" = "1" ]; then
+    CONFIG_JSON="$(jq --argjson d "$obj" '.destinations = [$d]' <<<"$CONFIG_JSON")" \
+      || die "could not set the destination in the configuration"
+  else
+    CONFIG_JSON="$(jq --argjson d "$obj" \
+      '(.destinations = ((.destinations // []) | map(select(.name != $d.name)) + [$d]))' <<<"$CONFIG_JSON")" \
+      || die "could not merge the destination into the configuration"
+  fi
+  write_private "$CONFIG_FILE" <<<"$CONFIG_JSON" || die "could not write $CONFIG_FILE"
+  load_config
+  select_destination "$name"
+
+  # The key, if the document brought one and the destination has no password
+  # source of its own. Straight into a 600 file -- the password never
+  # touches a command line and never lands in config.json itself.
+  local password keypath
+  password="$(jq -r '.password // ""' <<<"$doc")"
+  if [ -n "$(trim "$password")" ] && [ -z "$(dest '.password_file // empty')" ] \
+     && [ -z "$(dest '.password_command // empty')" ]; then
+    keypath="$CONFIG_DIR/$DEST_NAME.key"
+    printf '%s\n' "$(trim "$password")" | write_private "$keypath" || die "could not write $keypath"
+    cp -- "$CONFIG_FILE" "$CONFIG_FILE.bak" 2>/dev/null || true
+    jq --arg n "$DEST_NAME" --arg p "$keypath" \
+      '(.destinations[] | select(.name == $n) | .password_file) = $p' <<<"$CONFIG_JSON" \
+      | write_private "$CONFIG_FILE" || die "could not record password_file in $CONFIG_FILE"
+    CONFIG_JSON="$(jq --arg n "$DEST_NAME" --arg p "$keypath" \
+      '(.destinations[] | select(.name == $n) | .password_file) = $p' <<<"$CONFIG_JSON")"
+    printf 'Key written to %s (mode 600).\n' "$keypath"
+  fi
+
+  if [ -z "$(dest '.password_file // empty')" ] && [ -z "$(dest '.password_command // empty')" ] \
+     && [ -z "$(trim "$password")" ]; then
+    die "no password for $DEST_NAME -- the setup document needs a password field, or run omarchy-time-machine key set --dest $DEST_NAME first"
+  fi
+
+  restic_context
+
+  # The repository, if it does not exist yet. restic init on an existing repo
+  # is refused with "config file already exists" -- that is the second run of
+  # setup, not a failure. A wrong password on an existing repo is the one
+  # case that needs a different message.
+  if restic_run snapshots >/dev/null 2>&1; then
+    printf 'The repository already exists -- keeping it.\n'
+  elif restic_run init >/dev/null; then
+    printf 'Repository created at %s.\n' "$repository"
+  elif restic_run cat config >/dev/null 2>&1; then
+    printf 'The repository already exists -- keeping it.\n'
+  else
+    die "could not open or create the repository at $repository -- check the path, and the password if the repository exists elsewhere"
+  fi
+
+  cmd_install
+  printf '\nSetup complete. The timer handles the schedule from here; the panel shows the state of every run.\n'
 }
 
 # ---------------------------------------------------------------------------
@@ -2102,6 +2253,8 @@ omarchy-time-machine $VERSION
   restore --dest <name> --snapshot <id> --path </abs> [--target <dir>]
   check --dest <name>                 verify repository integrity
   install                             (re)write and enable the systemd units
+  apply-setup [--file PATH]           guided setup: JSON on stdin becomes a
+                                      config, a key, a repository and timers
   config create                       write a starter configuration
   log [--dest <name>]                 path of the most recent log file
   demo on|off|status                  invented data for screenshots; writes become no-ops
@@ -2126,6 +2279,7 @@ main() {
     install) cmd_install "$@" ;;
     report-failure) cmd_report_failure "$@" ;;
     log) cmd_log "$@" ;;
+    apply-setup) cmd_apply_setup "$@" ;;
     config) cmd_config "$@" ;;
     demo) cmd_demo "$@" ;;
     --version) printf '%s\n' "$VERSION" ;;
