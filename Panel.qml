@@ -435,7 +435,8 @@ Panel {
             fontFamily: root.fontFamily
             onClicked: {
               root.browsing = true
-              if (!TimeMachineStore.snapshotsLoaded) TimeMachineStore.loadSnapshots()
+              if (!TimeMachineStore.snapshotsLoaded || TimeMachineStore.snapshotsStale())
+                TimeMachineStore.loadSnapshots()
             }
           }
 

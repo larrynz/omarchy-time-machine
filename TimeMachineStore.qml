@@ -381,7 +381,11 @@ Singleton {
     stderr: StdioCollector {
       onStreamFinished: if (text !== "") root.setupError = text
     }
-    onFinished: function(exitCode, exitStatus) {
+    // quickshell's Process signal is exited: onFinished is a method the C++
+    // side calls itself, and assigning to it is a QML error that kills the
+    // whole plugin load -- bar glyph, panel, everything. qmllint does not
+    // catch it; the journal does.
+    onExited: function(exitCode, exitStatus) {
       root.setupBusy = false
       root.refresh()
     }
@@ -414,12 +418,25 @@ Singleton {
   property bool snapshotsBusy: false
   property string snapshotsError: ""
 
+  // The last success the list was loaded at. A session cache that never
+  // re-checks is how an empty listing outlives the backup that filled the
+  // repository: open the browser before the first run finishes and the empty
+  // list is held until the plugin reloads -- an hour later, after a reboot.
+  property string snapshotsLoadedAtSuccess: ""
+
+  function snapshotsStale() {
+    var d = browseDest
+    if (!d) return false
+    return String(d.last_success_at || "") !== snapshotsLoadedAtSuccess
+  }
+
   function loadSnapshots() {
     var d = browseDest
     if (!d || snapshotsBusy) return
     if (browseName === "") browseName = String(d.name)
     snapshotsBusy = true
     snapshotsError = ""
+    snapshotsLoadedAtSuccess = String(d.last_success_at || "")
     snapshotsProc.command = [root.cli, "snapshots", "--dest", String(d.name), "--json"]
     snapshotsProc.running = true
   }
