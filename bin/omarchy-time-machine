@@ -457,11 +457,20 @@ substitute_vars() {
 # schemes back to back, so anchoring at the start of the string does not work.
 # `sftp:user@host:/path` has no `//` at all and can never carry a password,
 # since restic authenticates it over SSH.
+#
+# The password part is everything up to the last `@` before the first slash --
+# Go's net/url, which restic parses URLs with, splits the user info exactly
+# there. A greedy `[^/]*@` therefore also covers passwords that carry a `:` or
+# an `@` themselves, where a fixed character set would leave half the password
+# behind: `me:p@ss@nas` used to display as `me@ss@nas`, and `sftp::pass@host`
+# used to keep the password whole. A raw `/` in a password is not covered, but
+# net/url cannot read such a URL either; percent-encoding is the way, and the
+# README says so.
 sanitize_repository() {
   printf '%s' "$1" | sed -E '
-    s#//([^/@:[:space:]]+):[^/@[:space:]]*@#//\1@#g;
-    s#//:[^/@[:space:]]*@#//#g;
-    s#^([a-z0-9+.-]+:)([^/@:[:space:]]+):[^/@[:space:]]*@#\1\2@#'
+    s#//:[^/]*@#//#g;
+    s#//([^/:]*):[^/]*@#//\1@#g;
+    s#^([a-z0-9+.-]+:)([^:/]*):[^/]*@#\1\2@#'
 }
 
 # Exports everything restic needs. Values go into the environment, never into
@@ -621,6 +630,13 @@ open_log() {
   local dir="$LOG_ROOT/$DEST_NAME"
   mkdir -p -m 700 -- "$dir"
   LOG_FILE="$dir/$(date +%Y-%m-%d_%H%M%S).log"
+  # The sweep in private_dir keeps logs/ itself, so a symlink can sit on the
+  # one name this file is about to take: truncating through it would send
+  # every line to a file somebody else chose. Remove the entry instead, the
+  # same rule the state-file sweep applies.
+  if [ -L "$LOG_FILE" ] || { [ -e "$LOG_FILE" ] && [ ! -f "$LOG_FILE" ]; }; then
+    rm -f -- "$LOG_FILE"
+  fi
   : > "$LOG_FILE"
   chmod 600 -- "$LOG_FILE"
 }
@@ -733,14 +749,19 @@ Saved from: $(hostname 2>/dev/null || printf 'unknown host')
 
 Without this password the backup cannot be opened. Not by you, not by anyone."
 
+  # --rawfile, not --arg: an --arg value sits on jq's own command line, and
+  # /proc/PID/cmdline is 0444 -- readable by every account on the machine,
+  # which is the exact route this script refuses everywhere else. rtrimstr
+  # takes off the trailing newline that `key set` writes, so what 1Password
+  # stores is the password itself, not the file contents.
   template="$(jq -n \
     --arg title "$title" \
-    --arg password "$(cat -- "$keyfile")" \
+    --rawfile password "$keyfile" \
     --arg notes "$notes" \
     '{title: $title,
       category: "PASSWORD",
       fields: [{id: "password", type: "CONCEALED", purpose: "PASSWORD",
-                label: "password", value: $password},
+                label: "password", value: ($password | rtrimstr("\n"))},
                {id: "notesPlain", type: "STRING", purpose: "NOTES",
                 label: "notesPlain", value: $notes}]}')" ||
     die "could not build the 1Password item"
@@ -1568,6 +1589,13 @@ cmd_restore() {
   local target restore_exit
   target="$(expand_tilde "$OPT_TARGET")"
   [ -n "$target" ] || target="$HOME/Restored/$(date +%Y-%m-%d-%H%M)"
+  # restic overwrites what is already in the target, so a stray --target /
+  # typed by hand would lay old files over the running system. The widget
+  # never passes --target; these two are the values a typo can produce, and
+  # the two that must never be one.
+  if [ "$target" = "/" ] || [ "$target" = "$HOME" ]; then
+    die "refusing to restore into $target; pick a directory that holds nothing else"
+  fi
   mkdir -p -- "$target" || die "could not create $target"
 
   private_dir "$STATE_DIR" logs
@@ -1661,6 +1689,33 @@ JSON
 # ---------------------------------------------------------------------------
 # systemd
 # ---------------------------------------------------------------------------
+
+# The schedule and its delay are interpolated verbatim into a unit file, and
+# unit files are parsed line by line: a newline in either value would inject
+# whatever follows as unit directives -- an ExecStartPre of somebody else's
+# choosing, enabled by install without asking. `name` is restricted to a safe
+# character set for the same reason; these get the same treatment. Calendar
+# specs and time spans are ASCII by nature, so the character check is strict,
+# and systemd-analyze -- the same parser the unit will get -- catches the
+# typo'd spec that would otherwise fail to schedule silently.
+check_unit_values() {
+  local name="$1" schedule="$2" delay="$3"
+  # case, not [[ ]]: a literal space inside a bracket class is a syntax error
+  # in bash conditional expressions, and [:space:] is the one way to say it.
+  case "$schedule" in
+    *[!-A-Za-z0-9*:.,~/[:space:]]*)
+      die "schedule of $name contains characters a calendar spec cannot use; refusing to write them into a unit file" ;;
+  esac
+  case "$delay" in
+    *[!-0-9A-Za-z[:space:]]*)
+      die "randomized_delay of $name contains characters a time span cannot use; refusing to write them into a unit file" ;;
+  esac
+  if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze calendar "$schedule" >/dev/null 2>&1 ||
+      die "schedule of $name is not a calendar spec systemd accepts: \"$schedule\" (check with: systemd-analyze calendar \"$schedule\")"
+  fi
+  return 0
+}
 
 # systemd user services do not inherit the shell PATH. restic, jq, ssh and
 # notify-send live in /usr/bin; a user's pre_command often lives in
@@ -1756,6 +1811,7 @@ cmd_install() {
     schedule="$(jq -r --arg n "$name" '.destinations[] | select(.name==$n) | .schedule // ""' <<<"$CONFIG_JSON")"
     [ -n "$schedule" ] || continue
     delay="$(jq -r --arg n "$name" '.destinations[] | select(.name==$n) | .randomized_delay // "15m"' <<<"$CONFIG_JSON")"
+    check_unit_values "$name" "$schedule" "$delay"
     names+=("$name")
     write_unit "omarchy-time-machine@$name.timer" "$(timer_unit "$name" "$schedule" "$delay")"
   done < <(cfg '.destinations[].name')

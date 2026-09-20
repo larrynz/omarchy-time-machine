@@ -69,6 +69,8 @@ List more than one and the panel lists them all, each with its own schedule and 
 
 Anywhere restic can write works: a local disk, SFTP, a REST server, S3, Minio, Wasabi, Backblaze B2, Azure Blob, Google Cloud Storage, Alibaba OSS, OpenStack Swift, or anything rclone can reach. A drive in your bag and a bucket in the cloud is a good pair: one is fast, the other survives your house.
 
+If a URL carries a username and password, percent-encode the password: `p@ss` becomes `p%40ss`. A raw `/` or space breaks the URL for restic itself, and a password restic cannot parse is also one the panel cannot reliably hide -- percent-encoding is the one form every backend accepts.
+
 ## Pick a password
 
 Your backups are encrypted, and that's not optional. An external drive gets lost, a NAS gets stolen, a bucket in the cloud sits on somebody else's computer. Encrypted means that when your backup ends up somewhere you didn't intend, it's noise to whoever finds it.
@@ -102,6 +104,16 @@ omarchy-time-machine key save-1password --dest backup-drive
 ```
 
 That writes it into your vault as "Time Machine backup key (backup-drive)", with a note saying which destination it opens. It refuses if an item by that name already exists, because two of them is how you end up trying the wrong one in a year.
+
+### Credentials beyond the password
+
+Some destinations need more than a password: an access key for a bucket, a token for a rest server. Every destination can carry an env file at `~/.config/omarchy-time-machine/<name>.env` -- or wherever `secrets_file` in the config points -- holding `KEY=VALUE` lines. A `${NAME}` in the repository URL is replaced with the matching value:
+
+```json
+{ "name": "offsite", "repository": "s3:s3.amazonaws.com/${bucket}" }
+```
+
+Everything in that file is exported to restic and to the commands the backup runs around it, `pre_command` included. Put in it only what the backup needs: anything there reaches every process a run spawns.
 
 ## Getting files back
 

@@ -276,6 +276,12 @@ check $? "a relative path is refused"
 $CLI restore --dest test --snapshot "zzz" --path /tmp --json | jq -e '.ok == false' >/dev/null 2>&1
 check $? "restore refuses an invalid id (die inside \$( ) would only kill a subshell)"
 
+$CLI restore --dest test --snapshot "$SNAP" --path / --target / --json 2>/dev/null | jq -e '.ok == false' >/dev/null 2>&1
+check $? "restoring into / is refused, not executed"
+
+$CLI restore --dest test --snapshot "$SNAP" --path / --target "$HOME" --json 2>/dev/null | jq -e '.ok == false' >/dev/null 2>&1
+check $? "and so is restoring into the home directory itself"
+
 # --- stdout discipline -----------------------------------------------------
 #
 # The widget parses stdout. A stray progress line there is indistinguishable
@@ -426,6 +432,30 @@ if command -v systemd-analyze >/dev/null 2>&1; then
   check $? "systemd accepts the generated service"
 fi
 
+# The schedule and its delay are interpolated verbatim into the unit file, and
+# unit files are parsed line by line: a newline in either value would inject
+# whatever follows as unit directives, and install enables the unit without
+# asking. The refusal has to happen before the write, so the timer is removed
+# first and what is under test is whether it comes back.
+group "Unit value injection"
+
+rm -f "$XDG_CONFIG_HOME/systemd/user/omarchy-time-machine@test.timer"
+jq '.destinations[0].schedule = ("*-*-* 03:00:00\n\n[Service]\nExecStartPre=/tmp/evil")' \
+  "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
+$CLI install >/dev/null 2>&1
+[ "$?" != "0" ]
+check $? "install refuses a schedule with unit directives in it"
+[ ! -e "$XDG_CONFIG_HOME/systemd/user/omarchy-time-machine@test.timer" ]
+check $? "and nothing of it reached the timer file"
+
+jq '.destinations[0].schedule = "*-*-* 03:00:00"
+    | .destinations[0].randomized_delay = "15m\nNice=-20"' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
+$CLI install >/dev/null 2>&1
+[ ! -e "$XDG_CONFIG_HOME/systemd/user/omarchy-time-machine@test.timer" ]
+check $? "a randomized_delay with a newline is refused as well"
+
+cp "$WORK/config.bak" "$CONFIG"
+
 # --- multiple destinations -------------------------------------------------
 
 group_restic "Multiple destinations"
@@ -518,13 +548,32 @@ jq '.destinations[0].repository = "sftp:me:hunter2@nas:/volume1/backup"' "$CONFI
 OP_ARGV="$WORK/op-argv" OP_CAPTURE="$WORK/op-stdin" PATH="$WORK/stub:$PATH" \
   $CLI key save-1password --dest test >/dev/null 2>&1
 
-grep -q "test-password" "$WORK/op-argv" 2>/dev/null && false || true
+grep -q "test-password" "$WORK/op-argv" 2>/dev/null
+[ $? -ne 0 ]
 check $? "the key never appears in op's arguments"
+
+# op is only half of that trip. The template is built by jq, and an --arg value
+# sits on jq's own command line, where /proc/PID/cmdline is readable by every
+# account on the machine. The stub below wraps the real jq and records what it
+# was handed.
+cat > "$WORK/stub/jq" <<STUB
+#!/usr/bin/env bash
+printf '%s\0' "\$@" >> "\$JQ_ARGV"
+exec $(command -v jq) "\$@"
+STUB
+chmod +x "$WORK/stub/jq"
+OP_ARGV="$WORK/op-argv" OP_CAPTURE="$WORK/op-stdin" JQ_ARGV="$WORK/jq-argv" PATH="$WORK/stub:$PATH" \
+  $CLI key save-1password --dest test >/dev/null 2>&1
+
+grep -q "test-password" "$WORK/jq-argv" 2>/dev/null
+[ $? -ne 0 ]
+check $? "and it never reaches jq's command line either"
 
 jq -e '.fields[0].value == "test-password"' "$WORK/op-stdin" >/dev/null 2>&1
 check $? "it travels on stdin inside the item template"
 
-grep -q "hunter2" "$WORK/op-stdin" 2>/dev/null && false || true
+grep -q "hunter2" "$WORK/op-stdin" 2>/dev/null
+[ $? -ne 0 ]
 check $? "and the note names the destination without its password"
 
 # op that is present but not signed in must fail immediately. A backup tool
@@ -539,6 +588,33 @@ START="$(date +%s)"
 PATH="$WORK/stub:$PATH" $CLI key save-1password --dest test >/dev/null 2>&1
 [ "$(( $(date +%s) - START ))" -lt 5 ]
 check $? "a 1Password that will not answer fails fast instead of hanging"
+
+cp "$WORK/config.bak" "$CONFIG"
+
+# --- password redaction -----------------------------------------------------
+#
+# What reaches status.json and the panel is the repository with the password
+# removed and the username kept. The password part is everything up to the
+# last `@` before the first slash -- the same split Go's net/url makes, so
+# what the panel hides is what restic would read.
+
+group "Password redaction"
+
+jq '.destinations[0].repository = "rest:http://me:hu:nter2@nas:8000/"' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
+$CLI destinations --json 2>/dev/null | jq -e '[.destinations[].repository_display] | all(. | test("hu:nter2") | not)' >/dev/null 2>&1
+check $? "a password carrying a colon does not survive redaction"
+
+jq '.destinations[0].repository = "rest:http://:hunter2@nas:8000/"' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
+$CLI destinations --json 2>/dev/null | jq -e '[.destinations[].repository_display] | all(. | test("hunter2") | not)' >/dev/null 2>&1
+check $? "and neither does one with no username in front of it"
+
+jq '.destinations[0].repository = "rest:http://me:p@ss@nas:8000/"' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
+$CLI destinations --json 2>/dev/null | jq -e '[.destinations[].repository_display] | all(. | test("me@ss") | not)' >/dev/null 2>&1
+check $? "a password carrying an @ leaves no fragment behind"
+
+jq '.destinations[0].repository = "rest:http://me:hunter2@nas:8000/a@b"' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
+$CLI destinations --json 2>/dev/null | jq -e '[.destinations[].repository_display] | all(. | test("nas:8000/a@b"))' >/dev/null 2>&1
+check $? "a path containing an @ still displays intact"
 
 cp "$WORK/config.bak" "$CONFIG"
 
