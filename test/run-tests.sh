@@ -443,7 +443,7 @@ check $? "the service does not excuse restic exit 3"
 # install exits non-zero here because systemd cannot enable a unit under a
 # redirected XDG_CONFIG_HOME. What is under test is that it rewrites nothing.
 OUT="$($CLI install 2>&1)"
-[ "$(grep -c 'unchanged' <<<"$OUT")" = "3" ]
+[ "$(grep -c 'unchanged' <<<"$OUT")" = "5" ]
 check $? "install rewrites nothing on a second run"
 
 if command -v systemd-analyze >/dev/null 2>&1; then
@@ -822,6 +822,23 @@ check $? "apply-setup refuses a name with a space"
 OUT="$(printf '%s' '{"name":"nopass","repository":"'"$WORK"'/nopass-repo"}' | $CLI apply-setup 2>&1)"
 grep -q "no password" <<<"$OUT"
 check $? "apply-setup refuses a destination with no password"
+
+U="$XDG_CONFIG_HOME/systemd/user"
+
+[ -f "$U/omarchy-time-machine-config.path" ]
+check $? "apply-setup installs the config-watching path unit"
+
+[ -f "$U/omarchy-time-machine-config.service" ]
+check $? "apply-setup installs the config-sync service"
+
+# A config edit alone changed nothing: the timer kept firing the schedule
+# from install time. install must regenerate the timer from the CURRENT
+# config, and the path unit must exist to trigger it on a real edit.
+NAME0="$(jq -r '.destinations[0].name' "$CONFIG")"
+jq '.destinations[0].schedule = "*-*-01 03:00:00"' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
+$CLI install >/dev/null 2>&1 || true
+grep -q '\*-\*-01' "$U/omarchy-time-machine@$NAME0.timer"
+check $? "install regenerates the timer from the current config"
 
 cp "$WORK/config.bak" "$CONFIG"
 $CLI install >/dev/null 2>&1 || true

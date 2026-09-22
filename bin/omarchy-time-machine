@@ -1942,6 +1942,37 @@ WantedBy=timers.target
 UNIT
 }
 
+# The config file is the source of truth for the schedule, but a systemd timer
+# fires from the OnCalendar written at install time. A config.json edit alone
+# therefore changed nothing: the timer kept firing the old schedule until the
+# next install -- or the next reboot. A path unit watching the config closes
+# that gap: any edit triggers install, which regenerates the units from the
+# file the user just saved.
+config_sync_unit() {
+  cat <<UNIT
+[Unit]
+Description=Regenerate Time Machine units after a config change
+
+[Service]
+Type=oneshot
+Environment=PATH=$(unit_path_env)
+ExecStart=$SELF install
+UNIT
+}
+
+config_path_unit() {
+  cat <<UNIT
+[Unit]
+Description=Watch the Time Machine config for changes
+
+[Path]
+PathChanged=$CONFIG_FILE
+
+[Install]
+WantedBy=paths.target
+UNIT
+}
+
 write_unit() {
   # Separate statements on purpose: bash expands every argument of `local`
   # before performing any of the assignments, so a `path="$DIR/$filename"` on
@@ -2005,6 +2036,8 @@ cmd_install() {
   printf 'Writing units into %s:\n' "$SYSTEMD_DIR"
   write_unit "omarchy-time-machine@.service" "$(service_unit)"
   write_unit "omarchy-time-machine-failed@.service" "$(failed_unit)"
+  write_unit "omarchy-time-machine-config.service" "$(config_sync_unit)"
+  write_unit "omarchy-time-machine-config.path" "$(config_path_unit)"
 
   local names=() name schedule delay unit path filename keep
   while IFS= read -r name; do
@@ -2035,6 +2068,14 @@ cmd_install() {
   shopt -u nullglob
 
   systemctl --user daemon-reload
+
+  # The path unit is what keeps the schedule in sync: enabled even when no
+  # destination has a schedule, so adding one to config.json applies itself.
+  if systemctl --user enable --now "omarchy-time-machine-config.path" >/dev/null 2>&1; then
+    printf '  enabled omarchy-time-machine-config.path\n'
+  else
+    printf '  could not enable omarchy-time-machine-config.path\n' >&2
+  fi
 
   if [ "${#names[@]}" -eq 0 ]; then
     printf '\nNo destination has a schedule, so nothing runs automatically.\n'
