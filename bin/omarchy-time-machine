@@ -1001,8 +1001,13 @@ cmd_status() {
                        progress:(if $running then $progress else null end)}]' <<<"$out")"
   done < <(cfg '.destinations[].name')
 
-  jq -nc --argjson d "$out" --argjson installed "$installed" \
-    '{ok:true, configured:true, invalid:false, units_installed:$installed, destinations:$d}'
+  # The folders to back up, always an array here: the panel seeds its setup
+  # form from this list, so a re-setup shows what is really configured.
+  local src
+  src="$(cfg 'if (.source | type) == "array" then .source else [(.source // empty)] end')"
+  [ -n "$src" ] || src='[]'
+  jq -nc --argjson d "$out" --argjson installed "$installed" --argjson src "$src" \
+    '{ok:true, configured:true, invalid:false, units_installed:$installed, source:$src, destinations:$d}'
 }
 
 cmd_init() {
@@ -1729,7 +1734,7 @@ apply_setup_preset() {
 
 # One command for a setup screen. Takes a small JSON document on stdin:
 #   {"name": "backup", "repository": "/mnt/x/restic", "schedule": "daily",
-#    "display_name": "Backup", "password": "..."}
+#    "display_name": "Backup", "password": "...", "source": ["~", "/mnt/data"]}
 # Validates it against the same rules the units will get, merges it into
 # config.json -- replacing any destination of the same name, so applying
 # twice corrects instead of duplicating -- installs the key, creates the
@@ -1782,6 +1787,31 @@ cmd_apply_setup() {
     schedule=""
   fi
 
+  # The folders to back up: a string or an array from the setup document,
+  # normalized to an array in the config. Each entry must be a non-empty
+  # absolute or tilde path -- a relative path would resolve against the
+  # service's working directory, and a newline would break the preflight
+  # find that names unreadable directories before the first run.
+  local src_json
+  src_json=""
+  if jq -e '(.source | type) == "array"' <<<"$doc" >/dev/null 2>&1; then
+    src_json="$(jq -c '.source' <<<"$doc")"
+  elif jq -e '(.source | type) == "string"' <<<"$doc" >/dev/null 2>&1; then
+    src_json="$(jq -c '[.source]' <<<"$doc")"
+  elif jq -e '.source != null' <<<"$doc" >/dev/null 2>&1; then
+    die "source must be a string or an array of paths"
+  fi
+  if [ -n "$src_json" ]; then
+    local entry
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || die "source has an empty entry"
+      case "$entry" in
+        /*|~*) ;;
+        *) die "source paths must be absolute or start with ~: $entry" ;;
+      esac
+    done < <(jq -r '.[]' <<<"$src_json")
+  fi
+
   # The starter configuration when there is nothing yet, the real one
   # otherwise. On a fresh start the placeholder destination is replaced
   # outright -- it only exists to be pointed somewhere, and leaving it in
@@ -1805,6 +1835,14 @@ cmd_apply_setup() {
       '(.destinations = ((.destinations // []) | map(select(.name != $d.name)) + [$d]))' <<<"$CONFIG_JSON")" \
       || die "could not merge the destination into the configuration"
   fi
+
+  # The folders to back up, if the document brought them. Replaces whatever
+  # source the config had -- the setup form seeds from the existing list, so
+  # what it shows is what gets written.
+  if [ -n "$src_json" ]; then
+    CONFIG_JSON="$(jq --argjson src "$src_json" '.source = $src' <<<"$CONFIG_JSON")" \
+      || die "could not set the source in the configuration"
+  fi
   write_private "$CONFIG_FILE" <<<"$CONFIG_JSON" || die "could not write $CONFIG_FILE"
   load_config
   select_destination "$name"
@@ -1814,6 +1852,18 @@ cmd_apply_setup() {
   # touches a command line and never lands in config.json itself.
   local password keypath
   password="$(jq -r '.password // ""' <<<"$doc")"
+  # The document can bring a password_command instead of a literal password:
+  # a fetch from a password manager. Works for any command that prints the
+  # password -- pass show <entry>, op read <secret>, bw get <item> -- the
+  # command runs where the backups run, so a manager's CLI must be installed
+  # and unlocked there, not here. Validated like anything that lands in a
+  # unit: newlines would break the systemd unit this is recorded into.
+  local password_command
+  password_command="$(jq -r '.password_command // ""' <<<"$doc")"
+  password_command="$(printf '%s' "$password_command" | tr -d '\r\n')"
+  if [ -n "$(trim "$password")" ] && [ -n "$password_command" ]; then
+    die "the setup document sets both password and password_command; pick one"
+  fi
   if [ -n "$(trim "$password")" ] && [ -z "$(dest '.password_file // empty')" ] \
      && [ -z "$(dest '.password_command // empty')" ]; then
     keypath="$CONFIG_DIR/$DEST_NAME.key"
@@ -1825,6 +1875,26 @@ cmd_apply_setup() {
     CONFIG_JSON="$(jq --arg n "$DEST_NAME" --arg p "$keypath" \
       '(.destinations[] | select(.name == $n) | .password_file) = $p' <<<"$CONFIG_JSON")"
     printf 'Key written to %s (mode 600).\n' "$keypath"
+  fi
+  if [ -n "$password_command" ]; then
+    # Switching the password source: a command replaces any key file, so the
+    # key file is removed -- leaving both set is refused at runtime, and the
+    # file would hold a stale password the backups never use again.
+    rm -f -- "$CONFIG_DIR/$DEST_NAME.key"
+    # map, not an assignment on a filtered path: jq's `=` emits the updated
+    # subdocument per match, and the config file would end up holding the
+    # destination object instead of the configuration around it.
+    jq --arg n "$DEST_NAME" --arg c "$password_command" \
+      '.destinations = ((.destinations // []) | map(if .name == $n then . + {password_command: $c} | del(.password_file) else . end))' <<<"$CONFIG_JSON" \
+      | write_private "$CONFIG_FILE" || die "could not record password_command in $CONFIG_FILE"
+    CONFIG_JSON="$(jq --arg n "$DEST_NAME" --arg c "$password_command" \
+      '.destinations = ((.destinations // []) | map(if .name == $n then . + {password_command: $c} | del(.password_file) else . end))' <<<"$CONFIG_JSON")"
+    # dest() reads the DEST_JSON snapshot taken before the password blocks:
+    # the follow-up "no password" check must see the command, not the stale
+    # snapshot without one.
+    DEST_JSON="$(jq --arg c "$password_command" \
+      '.password_command = $c | del(.password_file)' <<<"$DEST_JSON")"
+    printf 'Password fetched with a command: %s\n' "$password_command"
   fi
 
   if [ -z "$(dest '.password_file // empty')" ] && [ -z "$(dest '.password_command // empty')" ] \
