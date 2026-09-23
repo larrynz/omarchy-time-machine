@@ -831,6 +831,35 @@ check $? "apply-setup installs the config-watching path unit"
 [ -f "$U/omarchy-time-machine-config.service" ]
 check $? "apply-setup installs the config-sync service"
 
+# --- source: the folders to back up -----------------------------------------
+
+# The setup document's source replaces the config's -- the panel seeds its
+# form from the existing list, so what it shows is what gets written. As
+# with the first apply, what is under test is the output and the config,
+# not the exit status: install exits non-zero under the redirected
+# XDG_CONFIG_HOME.
+printf '%s' '{"name":"setup-src","repository":"'"$WORK"'/setup-repo","schedule":"manual","password":"setup-password","source":["~","/mnt/data"]}' | $CLI apply-setup >/dev/null 2>&1
+jq -e '.source == ["~","/mnt/data"]' "$CONFIG" >/dev/null 2>&1
+check $? "apply-setup writes the source array into the configuration"
+
+$CLI status --json 2>/dev/null | jq -e '.source == ["~","/mnt/data"]' >/dev/null 2>&1
+check $? "status exposes the source array"
+
+printf '%s' '{"name":"setup-src","repository":"'"$WORK"'/setup-repo","schedule":"manual","password":"setup-password","source":"~"}' | $CLI apply-setup >/dev/null 2>&1
+jq -e '.source == ["~"]' "$CONFIG" >/dev/null 2>&1
+check $? "apply-setup normalizes a single-string source to an array"
+
+BEFORE="$(jq -c '.source' "$CONFIG")"
+OUT="$(printf '%s\n' '{"name":"setup-src","repository":"'"$WORK"'/setup-repo","schedule":"manual","password":"setup-password","source":["relative/path"]}' | $CLI apply-setup 2>&1)"
+grep -q "absolute or start with ~" <<<"$OUT"
+check $? "apply-setup refuses a relative source path"
+[ "$(jq -c '.source' "$CONFIG")" = "$BEFORE" ]
+check $? "a refused source leaves the configuration untouched"
+
+OUT="$(printf '%s\n' '{"name":"setup-src","repository":"'"$WORK"'/setup-repo","schedule":"manual","password":"setup-password","source":["~","/tmp/x\n; rm -rf /"]}' | $CLI apply-setup 2>&1)"
+grep -q "absolute or start with ~" <<<"$OUT"
+check $? "apply-setup refuses a newline-carrying source entry"
+
 # A config edit alone changed nothing: the timer kept firing the schedule
 # from install time. install must regenerate the timer from the CURRENT
 # config, and the path unit must exist to trigger it on a real edit.

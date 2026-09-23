@@ -1,5 +1,7 @@
+import Quickshell
 import QtQuick
 import QtQuick.Controls
+import Qt.labs.folderlistmodel
 import qs.Commons
 import qs.Ui
 
@@ -36,8 +38,29 @@ Panel {
   // and hands the keyboard to the listing, setting up is typing and hands it
   // to the form.
   property bool settingUp: false
+  // The folder picker: a sub-state of setting up. The picker replaces the
+  // form while it is open and hands the chosen path back to the field.
+  property bool pickingRepo: false
+  // What the picker is for: "repo" fills the repository field, "source"
+  // adds a folder to the backup list.
+  property string pickerTarget: "repo"
+  // The folders to back up, edited in the setup form's list.
+  property var setupSources: []
+  property string pickerPath: "/run/media"
   property string setupValidationError: ""
   property string setupSchedule: "daily"
+  // The password field's meaning: off, the text is the literal password (a
+  // 600 key file); on, the text is a command that prints it -- pass show
+  // <entry>, op read <secret>, anything that works where the backups run.
+  property bool setupPassIsCommand: false
+  // The setup form seeds its source list from the configuration, but the
+  // status that carries the list is fetched asynchronously: the form can be
+  // open before it arrives. Seed once on the first entry per panel lifetime
+  // and re-seed when the fetch lands; after that the list is a draft like
+  // every other field -- re-seeding on every entry would clobber folders
+  // the user added but has not applied yet.
+  property bool setupSeeded: false
+  property bool setupEverOpened: false
 
   readonly property color barIconColor: {
     if (TimeMachineStore.running) return accent
@@ -79,6 +102,11 @@ Panel {
   onOpenedChanged: {
     if (!opened) {
       root.browsing = false
+      // The picker is a sub-state of setting up, but the close reset above
+      // did not cover it: click away while picking and the picker was still
+      // visible when the panel reopened -- drawing over the main view until
+      // the setup flow was re-entered.
+      root.pickingRepo = false
       root.settingUp = false
       return
     }
@@ -93,8 +121,33 @@ Panel {
   }
 
   onSettingUpChanged: {
-    if (settingUp) setupName.forceActiveFocus()
-    else if (!browsing) keyCatcher.forceActiveFocus()
+    if (settingUp) {
+      setupName.forceActiveFocus()
+      // Seed only on the first entry: afterwards the source list is a draft
+      // that survives closing the panel, like the name, repo and password
+      // fields. Re-seeding here would wipe folders the user added but has
+      // not applied yet.
+      if (!root.setupEverOpened) {
+        root.setupEverOpened = true
+        root.setupSeeded = false
+        var src = TimeMachineStore.sources && TimeMachineStore.sources.length > 0
+                  ? TimeMachineStore.sources : []
+        root.setupSources = src.length > 0 ? src.slice() : [Quickshell.env("HOME") || "/"]
+      }
+    } else if (!browsing) {
+      keyCatcher.forceActiveFocus()
+    }
+  }
+
+  Connections {
+    target: TimeMachineStore
+    function onSourcesChanged() {
+      if (!root.settingUp || root.setupSeeded) return
+      root.setupSeeded = true
+      var src = TimeMachineStore.sources && TimeMachineStore.sources.length > 0
+                ? TimeMachineStore.sources.slice() : []
+      root.setupSources = src.length > 0 ? src : [Quickshell.env("HOME") || "/"]
+    }
   }
 
   BarIconButton {
@@ -185,8 +238,9 @@ Panel {
                            panel.availableCardWidth > 0 ? panel.availableCardWidth : desiredWidth)
     contentHeight: panel.fittedContentHeight(
                      root.browsing ? browser.implicitHeight
+                                   : (root.pickingRepo ? pickerColumn.implicitHeight
                                    : (root.settingUp ? setupColumn.implicitHeight
-                                                     : mainColumn.implicitHeight),
+                                                     : mainColumn.implicitHeight)),
                      Style.space(560))
 
     PanelKeyCatcher {
@@ -210,6 +264,7 @@ Panel {
         else if (root.browsing && browser.confirmOpen) browser.confirmCancel()
         else if (root.browsing && browser.filter !== "") browser.clearFilter()
         else if (root.browsing) root.browsing = false
+        else if (root.pickingRepo) root.pickingRepo = false
         else if (root.settingUp) root.settingUp = false
         else root.close()
       }
@@ -230,14 +285,17 @@ Panel {
       Flickable {
         id: mainScroll
         anchors.fill: parent
-        visible: !root.browsing
+        // Hidden while browsing AND while setting up: neither of those views
+        // hides itself, so a setup form that forgot this line drew straight
+        // over the main view -- both visible, overlapping text, unreadable.
+        visible: !root.browsing && !root.settingUp
         contentWidth: width
         contentHeight: mainColumn.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        ScrollBar.vertical: ScrollBar { policy: mainScroll.contentHeight > mainScroll.height ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded }
 
         Column {
           id: mainColumn
@@ -485,14 +543,16 @@ Panel {
       Flickable {
         id: setupScroll
         anchors.fill: parent
-        visible: root.settingUp
+        visible: root.settingUp && !root.pickingRepo
         contentWidth: width
         contentHeight: setupColumn.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        // Same scrollbar treatment as the picker: visible while the form is
+        // taller than the view, draggable even where the wheel is not.
+        ScrollBar.vertical: ScrollBar { policy: setupScroll.contentHeight > setupScroll.height ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded }
 
         Column {
           id: setupColumn
@@ -552,6 +612,85 @@ Panel {
             width: parent.width
             topPadding: Style.space(6)
             bottomPadding: Style.space(2)
+            text: "Folders to back up"
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          // The backup folders, one row each with a remove button. Seeded
+          // with the home folder (or the existing configuration's list), so
+          // the first run has something to back up.
+          Repeater {
+            model: root.setupSources
+
+            delegate: Item {
+              width: parent.width
+              height: sourceRowBg.height
+
+              Rectangle {
+                id: sourceRowBg
+                width: parent.width
+                height: Math.max(pathText.implicitHeight + Style.space(6), Style.space(26))
+                radius: Style.space(4)
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+                border.width: 1
+                border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+
+                Text {
+                  id: pathText
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(6)
+                  anchors.right: removeButton.left
+                  anchors.rightMargin: Style.space(4)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: modelData
+                  textFormat: Text.PlainText
+                  elide: Text.ElideMiddle
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Text {
+                  id: removeButton
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.space(6)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "\u00d7"
+                  textFormat: Text.PlainText
+                  color: root.dimmer
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+
+                TapHandler {
+                  onTapped: {
+                    var i = index
+                    root.setupSources = root.setupSources.filter(function(_, j) { return j !== i })
+                  }
+                }
+              }
+            }
+          }
+
+          MenuRow {
+            width: parent.width
+            label: "Add folder\u2026"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: {
+              root.pickerPath = Quickshell.env("HOME") || "/"
+              root.pickerTarget = "source"
+              root.pickingRepo = true
+            }
+          }
+
+          Text {
+            width: parent.width
+            topPadding: Style.space(6)
+            bottomPadding: Style.space(2)
             text: "Repository"
             textFormat: Text.PlainText
             color: root.dim
@@ -559,21 +698,57 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
-          TextField {
-            id: setupRepo
+          Item {
             width: parent.width
-            placeholderText: "/run/media/\u2026/restic"
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            color: root.foreground
-            placeholderTextColor: root.dimmer
-            selectByMouse: true
-            background: Rectangle {
-              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+            height: setupRepo.height
+
+            TextField {
+              id: setupRepo
+              width: parent.width - repoBrowseButton.width - Style.space(6)
+              placeholderText: "/run/media/\u2026/restic"
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              color: root.foreground
+              placeholderTextColor: root.dimmer
+              selectByMouse: true
+              background: Rectangle {
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+                radius: Style.space(4)
+                border.width: 1
+                border.color: setupRepo.activeFocus ? root.accent
+                              : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+              }
+            }
+
+            // The folder picker: opens the browse view rooted at the mounted
+            // drives for this user, so picking the repository is a click, not
+            // a typed path.
+            Rectangle {
+              id: repoBrowseButton
+              anchors.right: parent.right
+              width: Style.space(64)
+              height: parent.height
               radius: Style.space(4)
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
               border.width: 1
-              border.color: setupRepo.activeFocus ? root.accent
-                            : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+              border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+
+              Text {
+                anchors.centerIn: parent
+                text: "Browse\u2026"
+                textFormat: Text.PlainText
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              TapHandler {
+                onTapped: {
+                  root.pickerPath = "/run/media/" + (Quickshell.env("USER") || "")
+                  root.pickerTarget = "repo"
+                  root.pickingRepo = true
+                }
+              }
             }
           }
 
@@ -588,10 +763,23 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
+          Text {
+            width: parent.width
+            topPadding: Style.space(6)
+            bottomPadding: Style.space(2)
+            text: root.setupPassIsCommand
+                  ? "Command that prints the password"
+                  : "Password (stored in a 600 file)"
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
           TextField {
             id: setupPassword
             width: parent.width
-            echoMode: TextInput.Password
+            echoMode: root.setupPassIsCommand ? TextInput.Normal : TextInput.Password
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             color: root.foreground
@@ -603,6 +791,16 @@ Panel {
               border.color: setupPassword.activeFocus ? root.accent
                             : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
             }
+          }
+
+          MenuRow {
+            width: parent.width
+            label: root.setupPassIsCommand
+                   ? "Fetched with a command \u2014 click to store in a key file instead"
+                   : "Stored in a key file \u2014 click to fetch with a command instead"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.setupPassIsCommand = !root.setupPassIsCommand
           }
 
           Text {
@@ -700,8 +898,13 @@ Panel {
                 return
               }
               if (setupPassword.text === "") {
-                root.setupValidationError =
-                  "A password is required \u2014 it is stored in a 600 file, never in the configuration"
+                root.setupValidationError = root.setupPassIsCommand
+                  ? "A password command is required \u2014 for example: pass show <entry> or op read <secret>"
+                  : "A password is required \u2014 it is stored in a 600 file, never in the configuration"
+                return
+              }
+              if (root.setupSources.length === 0) {
+                root.setupValidationError = "At least one folder to back up is required"
                 return
               }
               root.setupValidationError = ""
@@ -710,7 +913,9 @@ Panel {
                 display_name: name,
                 repository: repo,
                 schedule: setupSchedule,
-                password: setupPassword.text
+                password: root.setupPassIsCommand ? undefined : setupPassword.text,
+                password_command: root.setupPassIsCommand ? setupPassword.text.trim() : undefined,
+                source: root.setupSources.slice()
               })
             }
           }
@@ -721,6 +926,125 @@ Panel {
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: root.settingUp = false
+          }
+        }
+      }
+
+      // --- repository folder picker -----------------------------------------
+
+      // A fourth view: the picker replaces the setup form while it is open.
+      // A FolderDialog would be a second window, and this plugin avoids second
+      // windows -- keyboard focus on Wayland is lost the moment the first one
+      // closes. FolderListModel lists the directory in place: click to
+      // descend, Up to go back, Use this folder to hand the path to the field.
+      Flickable {
+        id: repoPicker
+        anchors.fill: parent
+        visible: root.pickingRepo
+        contentWidth: width
+        contentHeight: pickerColumn.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        // Always visible while the list is taller than the view: the bar is
+        // a way to scroll that works even where the wheel does not.
+        ScrollBar.vertical: ScrollBar { policy: repoPicker.contentHeight > repoPicker.height ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded }
+
+        FolderListModel {
+          id: repoDirs
+          // Qt6's FolderListModel has showDirs, not showDirsOnly: files stay
+          // in the model and the delegate hides them instead. The folder
+          // property needs a file:// scheme: a bare path fails silently and
+          // the model keeps listing its default -- the working directory --
+          // so the user sees no folders at all. Verified against Qt 6.11:
+          // a file:// URL works both at parse time and when the path changes.
+          // showHidden so the picker can reach ~/.config and the rest: hidden
+          // folders are backed up too, so hiding them here hides real
+          // destinations.
+          showDirs: true
+          showHidden: true
+          folder: "file://" + root.pickerPath
+        }
+
+        Column {
+          id: pickerColumn
+          width: repoPicker.width
+          spacing: 0
+
+          // The row MouseAreas swallow drags, and wheel events that route
+          // through a layer surface do not always reach the Flickable's own
+          // handling. This handler scrolls the list directly: it accepts the
+          // wheel, so the Flickable never double-scrolls, and the Flickable's
+          // StopAtBounds clamping still applies.
+          WheelHandler {
+            target: repoPicker
+            property: "contentY"
+            targetTransformAroundCursor: false
+          }
+
+          Text {
+            width: parent.width
+            bottomPadding: Style.space(4)
+            text: root.pickerTarget === "source" ? "Add a folder to back up" : "Choose the repository folder"
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            width: parent.width
+            bottomPadding: Style.space(8)
+            text: root.pickerPath
+            textFormat: Text.PlainText
+            elide: Text.ElideMiddle
+            color: root.dimmer
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          // Up: the parent directory. The safety net when the default root
+          // does not exist or the user went one level too far.
+          MenuRow {
+            width: parent.width
+            label: "Up"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: {
+              var i = root.pickerPath.lastIndexOf("/")
+              root.pickerPath = i <= 0 ? "/" : root.pickerPath.substring(0, i)
+            }
+          }
+
+          Repeater {
+            model: repoDirs
+
+            delegate: MenuRow {
+              width: parent.width
+              visible: fileIsDir
+              label: fileName
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.pickerPath = filePath
+            }
+          }
+
+          MenuRow {
+            width: parent.width
+            label: "Use this folder"
+            foreground: root.accent
+            fontFamily: root.fontFamily
+            onClicked: {
+              if (root.pickerTarget === "source") {
+                var next = root.setupSources.slice()
+                if (next.indexOf(root.pickerPath) === -1) next.push(root.pickerPath)
+                root.setupSources = next
+              } else {
+                setupRepo.text = root.pickerPath
+              }
+              root.pickingRepo = false
+            }
           }
         }
       }
