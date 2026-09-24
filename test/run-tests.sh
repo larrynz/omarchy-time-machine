@@ -146,6 +146,21 @@ check $? "snapshot count and repository size are recorded"
 [ "$($CLI snapshots --dest test --json | jq -r '.snapshots[0].summary.total_files_processed')" = "3" ]
 check $? "the exclude file is honoured (.env stayed out)"
 
+# The audit runs after every backup, successful or not, and compares what is
+# on disk with what landed in the snapshot. The excluded file is missing by
+# design, so it lands in the expected bucket, not the alarm one.
+[ -f "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt" ]
+check $? "an audit file is written after every backup"
+grep -q "excluded by design, or created since: 1" "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt"
+check $? "the audit classifies the excluded file as expected-missing"
+grep -q "unreadable (the backup cannot read them): 0" "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt"
+check $? "the audit counts zero unreadable on a clean run"
+
+# The verdict also lands in status.json, which is what the panel reads: the
+# widget shows the audit's quality without anyone opening the audit file.
+jq -e '.destinations.test.last_audit.unreadable == 0' "$STATUS" >/dev/null 2>&1
+check $? "status.json records the clean audit verdict for the panel"
+
 # --- unreadable source files -----------------------------------------------
 #
 # restic exits 3 when it could not read something, and still writes a snapshot
@@ -162,6 +177,17 @@ chmod 000 "$WORK/src/docs/report.md"
 $CLI backup --dest test >/dev/null 2>&1
 [ $? -eq 1 ]
 check $? "an unreadable file fails the run, and reports it as a plain failure"
+
+# The audit runs after that failing backup too, and counts the unreadable
+# path -- which the diff cannot see, because an unreadable path never enters
+# the readable source listing -- and names the ACL fix with the real path.
+$CLI audit --dest test >/dev/null 2>&1
+grep -q "unreadable (the backup cannot read them): 1" "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt"
+check $? "the audit counts the unreadable path after a gapped run"
+grep -q "setfacl -Rm u:" "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt"
+check $? "the audit suggests the ACL fix with the real path"
+jq -e '.destinations.test.last_audit.unreadable == 1' "$STATUS" >/dev/null 2>&1
+check $? "status.json records the unreadable count after a gapped run"
 
 # restic's own 3 must not reach systemd. A unit is a copy in the user's home
 # that no plugin update can rewrite, so the moment the exit code needs
@@ -799,6 +825,65 @@ grep -q "already exists" <<<"$OUT"
 check $? "a second apply keeps the repository"
 [ "$(jq '.destinations | map(select(.name == "setup-test")) | length' "$XDG_CONFIG_HOME/omarchy-time-machine/config.json")" = "1" ]
 check $? "a second apply does not duplicate the destination"
+
+# An edit through apply-setup keeps what it does not send. The setup form
+# sends name, repository, schedule, source and optionally a password --
+# retention, pre_command and the password source must survive the merge,
+# because replacing the destination wholesale would quietly drop them, and
+# an edit that only changed the schedule would leave no password source.
+C="$XDG_CONFIG_HOME/omarchy-time-machine/config.json"
+jq '(.destinations[] | select(.name=="setup-test") | .retention) = {"daily":3,"weekly":2,"monthly":6,"yearly":1}
+    | (.destinations[] | select(.name=="setup-test") | .pre_command) = "true"' "$C" > "$C.n" && mv "$C.n" "$C"
+OUT="$(printf '%s' '{"name":"setup-test","repository":"'"$WORK"'/setup-repo","schedule":"weekly","source":"'"$HOME"'"}' | $CLI apply-setup 2>&1)"
+grep -qv "no password" <<<"$OUT"
+check $? "an edit without a password keeps the password source"
+[ "$(jq -r '.destinations[] | select(.name=="setup-test") | .retention.daily' "$C")" = "3" ]
+check $? "the merge preserves retention"
+[ "$(jq -r '.destinations[] | select(.name=="setup-test") | .pre_command' "$C")" = "true" ]
+check $? "the merge preserves pre_command"
+[ -n "$(jq -r '.destinations[] | select(.name=="setup-test") | .password_file // ""' "$C")" ]
+check $? "the merge preserves password_file"
+[ "$(jq -r '.destinations[] | select(.name=="setup-test") | .schedule' "$C")" = "Mon *-*-* 03:00:00" ]
+check $? "the merge takes the document's schedule"
+
+# A schedule left out of the document means "none": picking manual on an
+# edit must remove the old schedule, not silently keep firing it.
+OUT="$(printf '%s' '{"name":"setup-test","repository":"'"$WORK"'/setup-repo","schedule":"manual","source":"'"$HOME"'"}' | $CLI apply-setup 2>&1)"
+jq -e '.destinations[] | select(.name=="setup-test") | has("schedule") | not' "$C" >/dev/null
+check $? "switching to manual removes the old schedule"
+
+# A hand-typed time in the schedule passes the same validation the units
+# get: the setup form pre-fills the preset's expression and lets the user
+# alter it, and the altered expression is what the config stores.
+OUT="$(printf '%s' '{"name":"setup-test","repository":"'"$WORK"'/setup-repo","schedule":"*-*-* 05:30:00","source":"'"$HOME"'"}' | $CLI apply-setup 2>&1)"
+[ "$(jq -r '.destinations[] | select(.name=="setup-test") | .schedule' "$C")" = "*-*-* 05:30:00" ]
+check $? "a custom time is stored as given"
+
+OUT="$(printf '%s' '{"name":"setup-test","repository":"'"$WORK"'/setup-repo","schedule":"not-a-calendar"}' | $CLI apply-setup 2>&1)"
+grep -q "calendar" <<<"$OUT"
+check $? "apply-setup refuses a bad calendar expression"
+
+# A new password on an edit overwrites the key file -- that is how the user
+# says they want the password changed.
+OUT="$(printf '%s' '{"name":"setup-test","repository":"'"$WORK"'/setup-repo","schedule":"daily","password":"new-password","source":"'"$HOME"'"}' | $CLI apply-setup 2>&1)"
+grep -q "Key written to" <<<"$OUT"
+check $? "a new password on an edit overwrites the key file"
+grep -q '^new-password$' "$XDG_CONFIG_HOME/omarchy-time-machine/setup-test.key"
+check $? "the key file holds the new password"
+
+# The status payload reports how each destination gets its password, so the
+# panel's edit form can set the toggle and know whether the field may stay
+# empty.
+[ "$($CLI status --json | jq -r '.destinations[] | select(.name=="setup-test") | .password_mode')" = "key" ]
+check $? "status reports a key-file password mode"
+jq '.destinations[0] |= (del(.password_file) | .password_command = "pass show x")' "$C" > "$C.n" && mv "$C.n" "$C"
+[ "$($CLI status --json | jq -r '.destinations[0].password_mode')" = "command" ]
+check $? "status reports a command password mode"
+[ "$($CLI status --json | jq -r '.destinations[0].password_command')" = "pass show x" ]
+check $? "status carries the password command for the edit form"
+jq '.destinations[0] |= del(.password_command)' "$C" > "$C.n" && mv "$C.n" "$C"
+[ "$($CLI status --json | jq -r '.destinations[0].password_command')" = "null" ]
+check $? "status omits the command when there is none"
 
 # Malformed JSON, a newline in the repository, a newline in the schedule, a
 # name with a space and a destination with no password are all refused with a

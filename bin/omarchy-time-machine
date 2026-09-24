@@ -953,7 +953,7 @@ cmd_status() {
   fi
   load_config
 
-  local status active out name progress running epoch age updated installed repo
+  local status active out name progress running epoch age updated installed repo pwmode
   status="$(load_status)"
   epoch="$(date +%s)"
   out='[]'
@@ -986,6 +986,22 @@ cmd_status() {
 
     repo="$(sanitize_repository "$(jq -r --arg n "$name" '.destinations[] | select(.name==$n) | .repository // ""' <<<"$CONFIG_JSON")")"
 
+    # How this destination gets its restic password, so the panel's edit form
+    # can set the toggle and know whether the password field may stay empty.
+    # "command" means the config fetches it; "key" means the key file holds
+    # it; empty means the destination has no working password source yet. The
+    # command itself is not a secret -- the config holds it in plain text --
+    # so it travels too, and the edit form can show it back.
+    local pwc
+    pwc="$(jq -r --arg n "$name" '.destinations[] | select(.name==$n) | .password_command // ""' <<<"$CONFIG_JSON")"
+    if [ -n "$pwc" ]; then
+      pwmode="command"
+    elif readable_file "$CONFIG_DIR/$name.key" 2>/dev/null; then
+      pwmode="key"
+    else
+      pwmode=""
+    fi
+
     out="$(jq -c \
       --arg name "$name" \
       --arg label "$(jq -r --arg n "$name" '.destinations[] | select(.name==$n) | .display_name // $n' <<<"$CONFIG_JSON")" \
@@ -994,15 +1010,24 @@ cmd_status() {
       --arg schedule "$(jq -r --arg n "$name" '.destinations[] | select(.name==$n) | .schedule // ""' <<<"$CONFIG_JSON")" \
       --argjson running "$running" \
       --argjson progress "$progress" \
+      --arg pwmode "$pwmode" \
+      --arg pwc "$pwc" \
       '. + [$stored + {name:$name, display_name:$label,
                        schedule:(if $schedule == "" then null else $schedule end),
                        running:$running,
+                       password_mode:$pwmode,
+                       password_command:(if $pwc == "" then null else $pwc end),
                        repository_display:(if $repo == "" then ($stored.repository_display // "") else $repo end),
                        progress:(if $running then $progress else null end)}]' <<<"$out")"
   done < <(cfg '.destinations[].name')
 
-  jq -nc --argjson d "$out" --argjson installed "$installed" \
-    '{ok:true, configured:true, invalid:false, units_installed:$installed, destinations:$d}'
+  # The folders to back up, always an array here: the panel seeds its setup
+  # form from this list, so a re-setup shows what is really configured.
+  local src
+  src="$(cfg 'if (.source | type) == "array" then .source else [(.source // empty)] end')"
+  [ -n "$src" ] || src='[]'
+  jq -nc --argjson d "$out" --argjson installed "$installed" --argjson src "$src" \
+    '{ok:true, configured:true, invalid:false, units_installed:$installed, source:$src, destinations:$d}'
 }
 
 cmd_init() {
@@ -1257,6 +1282,19 @@ cmd_backup() {
   log_line ""
   log_line "Finished: $(date)"
 
+  # An audit runs after every backup, successful or not: the reader should
+  # not have to remember to ask whether files were skipped. Silent here (the
+  # log carries one line) and only for real runs -- a dry run writes nothing,
+  # so there is nothing to audit. The full path listing takes minutes on a
+  # large repository, so the unit stays active a little longer.
+  if [ "$OPT_DRY_RUN" != "1" ]; then
+    if audit_run 1 >/dev/null 2>&1; then
+      log_line "Audit written: $STATE_DIR/audit-$DEST_NAME.txt"
+    else
+      log_line "Audit could not be written"
+    fi
+  fi
+
   # The exit code answers "did the backup work", not "which restic internal
   # produced that answer". Passing restic's 3 straight through is what forced
   # SuccessExitStatus=3 into the service unit, and a unit is a copy in
@@ -1267,6 +1305,156 @@ cmd_backup() {
   # script is updated: they excuse exit 3, and exit 3 no longer happens.
   [ "$result" = "failed" ] && return 1
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# Audit
+# ---------------------------------------------------------------------------
+
+# The audit's verdict lands in status.json, so the panel can show the quality
+# of the newest backup without anyone opening the audit file. One object per
+# destination, replaced wholesale: an older audit that said "clean" must not
+# survive a newer one that found unreadable files.
+record_audit() {
+  local at="$1" unreadable="$2" tmp
+  [ -f "$STATUS_FILE" ] || return 0
+  # The same .summary. prefix the scratch sweep looks for, so a jq failure that
+  # abandons the temp file cannot accumulate across nightly runs.
+  tmp="$(mktemp -- "$STATE_DIR/.summary.XXXXXX")" || return 0
+  jq --arg name "$DEST_NAME" --arg at "$at" --argjson u "$unreadable" \
+    '.destinations[$name].last_audit = {at: $at, unreadable: $u}' "$STATUS_FILE" > "$tmp" \
+    && mv -- "$tmp" "$STATUS_FILE" || { rm -f -- "$tmp"; return 0; }
+}
+
+# Compares what is on disk with what actually landed in the latest snapshot.
+# restic reports unreadable files as errors and the summary counts only what
+# went in; neither answers "is anything missing from my backup". This does:
+# every file and folder under the current sources is listed on both sides and
+# diffed, then classified. A path that exists but cannot be read is the real
+# problem; one that is gone was deleted since the snapshot; one that is
+# readable but absent is excluded by design or changed since, and is context,
+# not an alarm.
+#
+# Runs after every backup (successful or not) and on demand. The full path
+# listing takes minutes on a large repository, so the automatic run only
+# writes the audit file; `audit --dest <name>` prints it too.
+cmd_audit() {
+  parse_options "$@"
+  load_config
+  select_destination "$OPT_DEST"
+  restic_context
+  audit_run 0
+}
+
+# The audit body, shared by the command and the automatic post-backup run.
+# The argument decides printing: the automatic run has no terminal to show
+# anything in.
+audit_run() {
+  local quiet="${1:-1}"
+
+  # The whole body in a subshell with its own EXIT trap: a trap set inside a
+  # function only fires on that function's return, and the listing runs below
+  # can die on any of many lines. A subshell's trap fires on exit, whichever
+  # line got there first.
+  (
+    local snapshot snapshot_id snapshot_time src u_first
+    local src_list snap_list missing unreadable_list audit_file="$STATE_DIR/audit-$DEST_NAME.txt"
+    local n_unreadable=0 n_gone=0 n_other=0
+
+    src_list="$(mktemp -- "$STATE_DIR/.audit.XXXXXX")" || exit 1
+    snap_list="$(mktemp -- "$STATE_DIR/.audit.XXXXXX")" || exit 1
+    missing="$(mktemp -- "$STATE_DIR/.audit.XXXXXX")" || exit 1
+    unreadable_list="$(mktemp -- "$STATE_DIR/.audit.XXXXXX")" || exit 1
+    trap 'rm -f -- "$src_list" "$snap_list" "$missing" "$unreadable_list"' EXIT
+
+    # What the latest snapshot holds. No snapshot yet: nothing to compare,
+    # and the audit says so rather than reporting empty counts as a bill of
+    # health.
+    snapshot="$(restic_run snapshots --latest 1 --json 2>/dev/null | jq -c '.[0] // empty' 2>/dev/null || true)"
+    if [ -z "$snapshot" ]; then
+      printf 'Backup audit for %s\nNo snapshot exists yet -- there is nothing to compare.\n' "$DEST_NAME" > "$audit_file"
+      if [ "$quiet" != "1" ]; then
+        cat -- "$audit_file"
+      fi
+      exit 0
+    fi
+    snapshot_id="$(jq -r '.short_id // .id // ""' <<<"$snapshot")"
+    snapshot_time="$(jq -r '.time // ""' <<<"$snapshot")"
+
+    # The two inventories, both lines of "f /path" or "d /path" so the diff
+    # compares like with like. The source side: everything the user can read.
+    # The unreadable paths are collected separately: they are the ones the
+    # backup cannot have, and find cannot descend into them to list their
+    # files, so the diff would never see those files at all.
+    while IFS= read -r src; do
+      [ -n "$src" ] || continue
+      src="$(expand_tilde "$src")"
+      [ -e "$src" ] || continue
+      find "$src" \( -type f -o -type d \) -readable -printf '%y %p\n' 2>/dev/null >> "$src_list"
+      find "$src" \( -type f -o -type d \) \! -readable -printf '%p\n' 2>/dev/null >> "$unreadable_list"
+    done < <(cfg 'if (.source | type) == "array" then .source[] else (.source // empty) end' 2>/dev/null)
+    restic_run ls "$snapshot_id" --json 2>/dev/null \
+      | jq -r 'select(.struct_type == "node") | (if .type == "dir" then "d" else "f" end) + " " + .path' 2>/dev/null \
+      >> "$snap_list" || true
+
+    sort -o "$src_list" "$src_list"
+    sort -o "$snap_list" "$snap_list"
+    comm -23 "$src_list" "$snap_list" > "$missing"
+
+    # Classify every missing path. Three buckets, and only the first is a
+    # problem: an unreadable path is data the backup cannot reach; a gone one
+    # was deleted after the snapshot was taken; an otherwise-readable one is
+    # an exclude pattern or a file created since, both of which are expected.
+    # Note the diff can only flag paths that were readable when the source
+    # was listed -- an unreadable one never entered that list -- so the
+    # unreadable total is the separate find, plus any race the diff caught.
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      src="${line:2}"
+      if [ ! -e "$src" ]; then
+        n_gone=$((n_gone + 1))
+      elif [ -r "$src" ]; then
+        n_other=$((n_other + 1))
+      else
+        n_unreadable=$((n_unreadable + 1))
+      fi
+    done < "$missing"
+    n_unreadable=$((n_unreadable + $(wc -l < "$unreadable_list")))
+
+    {
+      printf 'Backup audit for %s\n' "$DEST_NAME"
+      printf 'Snapshot: %s from %s\n' "$snapshot_id" "$snapshot_time"
+      printf 'Compared: %s\n' "$(date -Iseconds)"
+      printf '\nSource (readable):  %s files, %s folders\n' "$(grep -c '^f ' -- "$src_list")" "$(grep -c '^d ' -- "$src_list")"
+      printf 'Snapshot:           %s files, %s folders\n' "$(grep -c '^f ' -- "$snap_list")" "$(grep -c '^d ' -- "$snap_list")"
+      printf '\nMissing from the snapshot: %s paths\n' "$(wc -l < "$missing")"
+      printf '  unreadable (the backup cannot read them): %s\n' "$n_unreadable"
+      printf '  deleted since the snapshot: %s\n' "$n_gone"
+      printf '  excluded by design, or created since: %s\n' "$n_other"
+      if [ -s "$unreadable_list" ]; then
+        printf '\nPaths the backup cannot read (up to 20 shown):\n'
+        head -20 -- "$unreadable_list" | sed 's/^/  /'
+        u_first="$(head -1 -- "$unreadable_list")"
+        printf '\nAn ACL grants read access without touching ownership. To fix %s:\n' "$u_first"
+        printf '  sudo setfacl -Rm u:%s:rX %s\n' "$USER" "$u_first"
+        printf '  sudo setfacl -dm u:%s:rX %s   # default ACL, so future files inherit it\n' "$USER" "$u_first"
+        printf 'or exclude it from the source list.\n'
+      fi
+      printf '\nExcluded paths are missing by design; a path deleted after the snapshot\n'
+      printf 'was taken is not a problem. Only unreadable paths mean data the backup\n'
+      printf 'cannot reach.\n'
+    } > "$audit_file"
+
+    if [ "$quiet" != "1" ]; then
+      cat -- "$audit_file"
+    fi
+    # The verdict into status.json for the panel: the unreadable count is the
+    # one number the widget needs. No snapshot means nothing was compared, and
+    # the widget already says there is no backup yet -- recording an empty
+    # audit here would read as a verdict on a backup that does not exist.
+    record_audit "$(date -Iseconds)" "$n_unreadable"
+    exit 0
+  )
 }
 
 # Reads restic's --json stream: turns status lines into the progress file,
@@ -1729,9 +1917,10 @@ apply_setup_preset() {
 
 # One command for a setup screen. Takes a small JSON document on stdin:
 #   {"name": "backup", "repository": "/mnt/x/restic", "schedule": "daily",
-#    "display_name": "Backup", "password": "..."}
+#    "display_name": "Backup", "password": "...", "source": ["~", "/mnt/data"]}
 # Validates it against the same rules the units will get, merges it into
-# config.json -- replacing any destination of the same name, so applying
+# config.json -- the document's fields overwrite any destination of the same
+# name and the rest of that destination survives, so applying
 # twice corrects instead of duplicating -- installs the key, creates the
 # repository, and switches on the schedule. The password arrives on stdin,
 # never on a command line: a command line is readable by any process on the
@@ -1782,6 +1971,31 @@ cmd_apply_setup() {
     schedule=""
   fi
 
+  # The folders to back up: a string or an array from the setup document,
+  # normalized to an array in the config. Each entry must be a non-empty
+  # absolute or tilde path -- a relative path would resolve against the
+  # service's working directory, and a newline would break the preflight
+  # find that names unreadable directories before the first run.
+  local src_json
+  src_json=""
+  if jq -e '(.source | type) == "array"' <<<"$doc" >/dev/null 2>&1; then
+    src_json="$(jq -c '.source' <<<"$doc")"
+  elif jq -e '(.source | type) == "string"' <<<"$doc" >/dev/null 2>&1; then
+    src_json="$(jq -c '[.source]' <<<"$doc")"
+  elif jq -e '.source != null' <<<"$doc" >/dev/null 2>&1; then
+    die "source must be a string or an array of paths"
+  fi
+  if [ -n "$src_json" ]; then
+    local entry
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || die "source has an empty entry"
+      case "$entry" in
+        /*|~*) ;;
+        *) die "source paths must be absolute or start with ~: $entry" ;;
+      esac
+    done < <(jq -r '.[]' <<<"$src_json")
+  fi
+
   # The starter configuration when there is nothing yet, the real one
   # otherwise. On a fresh start the placeholder destination is replaced
   # outright -- it only exists to be pointed somewhere, and leaving it in
@@ -1801,21 +2015,53 @@ cmd_apply_setup() {
     CONFIG_JSON="$(jq --argjson d "$obj" '.destinations = [$d]' <<<"$CONFIG_JSON")" \
       || die "could not set the destination in the configuration"
   else
+    # Merge, not replace: the document's fields overwrite the destination's,
+    # and every other field (password_file, retention, pre_command) survives.
+    # Replacing wholesale would silently drop settings the setup form does
+    # not send, and an edit that only changed the schedule would leave the
+    # destination with no password source at all. A schedule left out of the
+    # document means "none", so the old one is removed rather than kept.
     CONFIG_JSON="$(jq --argjson d "$obj" \
-      '(.destinations = ((.destinations // []) | map(select(.name != $d.name)) + [$d]))' <<<"$CONFIG_JSON")" \
+      '(.destinations = ((.destinations // []) |
+         (if any(.[]; .name == $d.name)
+          then map(if .name == $d.name
+                   then (if ($d | has("schedule")) then (. + $d) else (. + $d | del(.schedule)) end)
+                   else . end)
+          else . + [$d] end)))' <<<"$CONFIG_JSON")" \
       || die "could not merge the destination into the configuration"
+  fi
+
+  # The folders to back up, if the document brought them. Replaces whatever
+  # source the config had -- the setup form seeds from the existing list, so
+  # what it shows is what gets written.
+  if [ -n "$src_json" ]; then
+    CONFIG_JSON="$(jq --argjson src "$src_json" '.source = $src' <<<"$CONFIG_JSON")" \
+      || die "could not set the source in the configuration"
   fi
   write_private "$CONFIG_FILE" <<<"$CONFIG_JSON" || die "could not write $CONFIG_FILE"
   load_config
   select_destination "$name"
 
-  # The key, if the document brought one and the destination has no password
-  # source of its own. Straight into a 600 file -- the password never
-  # touches a command line and never lands in config.json itself.
+  # The key, if the document brought one. Straight into a 600 file -- the
+  # password never touches a command line and never lands in config.json
+  # itself. An existing key file is overwritten: on an edit, typing a new
+  # password is how the user says they want it changed, and the merge kept
+  # the old password_file field precisely so this write has somewhere to go.
   local password keypath
   password="$(jq -r '.password // ""' <<<"$doc")"
-  if [ -n "$(trim "$password")" ] && [ -z "$(dest '.password_file // empty')" ] \
-     && [ -z "$(dest '.password_command // empty')" ]; then
+  # The document can bring a password_command instead of a literal password:
+  # a fetch from a password manager. Works for any command that prints the
+  # password -- pass show <entry>, op read <secret>, bw get <item> -- the
+  # command runs where the backups run, so a manager's CLI must be installed
+  # and unlocked there, not here. Validated like anything that lands in a
+  # unit: newlines would break the systemd unit this is recorded into.
+  local password_command
+  password_command="$(jq -r '.password_command // ""' <<<"$doc")"
+  password_command="$(printf '%s' "$password_command" | tr -d '\r\n')"
+  if [ -n "$(trim "$password")" ] && [ -n "$password_command" ]; then
+    die "the setup document sets both password and password_command; pick one"
+  fi
+  if [ -n "$(trim "$password")" ] && [ -z "$password_command" ]; then
     keypath="$CONFIG_DIR/$DEST_NAME.key"
     printf '%s\n' "$(trim "$password")" | write_private "$keypath" || die "could not write $keypath"
     cp -- "$CONFIG_FILE" "$CONFIG_FILE.bak" 2>/dev/null || true
@@ -1825,6 +2071,26 @@ cmd_apply_setup() {
     CONFIG_JSON="$(jq --arg n "$DEST_NAME" --arg p "$keypath" \
       '(.destinations[] | select(.name == $n) | .password_file) = $p' <<<"$CONFIG_JSON")"
     printf 'Key written to %s (mode 600).\n' "$keypath"
+  fi
+  if [ -n "$password_command" ]; then
+    # Switching the password source: a command replaces any key file, so the
+    # key file is removed -- leaving both set is refused at runtime, and the
+    # file would hold a stale password the backups never use again.
+    rm -f -- "$CONFIG_DIR/$DEST_NAME.key"
+    # map, not an assignment on a filtered path: jq's `=` emits the updated
+    # subdocument per match, and the config file would end up holding the
+    # destination object instead of the configuration around it.
+    jq --arg n "$DEST_NAME" --arg c "$password_command" \
+      '.destinations = ((.destinations // []) | map(if .name == $n then . + {password_command: $c} | del(.password_file) else . end))' <<<"$CONFIG_JSON" \
+      | write_private "$CONFIG_FILE" || die "could not record password_command in $CONFIG_FILE"
+    CONFIG_JSON="$(jq --arg n "$DEST_NAME" --arg c "$password_command" \
+      '.destinations = ((.destinations // []) | map(if .name == $n then . + {password_command: $c} | del(.password_file) else . end))' <<<"$CONFIG_JSON")"
+    # dest() reads the DEST_JSON snapshot taken before the password blocks:
+    # the follow-up "no password" check must see the command, not the stale
+    # snapshot without one.
+    DEST_JSON="$(jq --arg c "$password_command" \
+      '.password_command = $c | del(.password_file)' <<<"$DEST_JSON")"
+    printf 'Password fetched with a command: %s\n' "$password_command"
   fi
 
   if [ -z "$(dest '.password_file // empty')" ] && [ -z "$(dest '.password_command // empty')" ] \
@@ -2321,6 +2587,7 @@ main() {
     report-failure) cmd_report_failure "$@" ;;
     log) cmd_log "$@" ;;
     apply-setup) cmd_apply_setup "$@" ;;
+    audit) cmd_audit "$@" ;;
     config) cmd_config "$@" ;;
     demo) cmd_demo "$@" ;;
     --version) printf '%s\n' "$VERSION" ;;

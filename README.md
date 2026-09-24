@@ -1,14 +1,10 @@
 # Time Machine
 
-Backups you can forget about, until the day you can't.
+Time Machine is a backup plugin for Omarchy. It uses [restic](https://restic.net) to copy your folders to a destination you choose, on a schedule you choose, and it shows one icon in your bar. The icon is green when the latest backup succeeded and red when it did not, so you never have to open anything to know whether your backups are working.
 
-Time Machine copies your home folder somewhere safe every night, and puts one answer in your bar: when were my files last backed up? Most days that answer is boring. Today, 03:00. Fine, move on. On the day it isn't boring, the icon turns red and stays red until you deal with it.
+Backups are kept according to a retention schedule: by default 7 daily, 4 weekly, 12 monthly, and 3 yearly snapshots, with older ones pruned automatically. Files can be restored from a backup.
 
 ![Time Machine](screenshots/panel.png)
-
-It keeps every backup, not just the latest one. So when you notice on Thursday that you wrecked a file on Monday, you can go back to Sunday and take it back.
-
-The bar shows one icon and nothing else. No counter, no percentage, no badge tallying something at you all day. A widget that talks constantly is a widget you stop hearing, so this one keeps quiet until something breaks.
 
 ## Install
 
@@ -19,45 +15,41 @@ omarchy plugin enable jankeesvw.time-machine
 omarchy bar move jankeesvw.time-machine --section right
 ```
 
-[restic](https://restic.net) is the thing that does the actual copying. It's excellent, it's boring in the best way, and it's the only thing you need to install.
+restic is the only dependency.
 
 ### The command line
 
-Most of this you can do from the panel. The rest is a command that lives inside the plugin rather than on your `PATH`, so typing `omarchy-time-machine` on its own gets you `command not found`:
+Some tasks are easier from a terminal. The plugin's command is not installed on your `PATH`; it lives inside the plugin directory:
 
 ```bash
 ~/.config/omarchy/plugins/jankeesvw.time-machine/bin/omarchy-time-machine
 ```
 
-Every `omarchy-time-machine ...` line below means that path. If you are going to type it more than once, give it a name:
+Every `omarchy-time-machine ...` example below refers to that path. To type it comfortably, add an alias to your `~/.bashrc`:
 
 ```bash
 alias omarchy-time-machine=~/.config/omarchy/plugins/jankeesvw.time-machine/bin/omarchy-time-machine
 ```
 
-Put that in your `~/.bashrc` to keep it. The plugin never adds anything to your `PATH` itself, because where your shell looks for commands is yours to decide.
+## Setting up backups
 
-## Point it somewhere
+Click the icon and choose **Setup Backups**. The form has five fields:
 
-Click the icon in your bar and choose **Create Configuration**. It writes a starter file and opens it in your editor, so you're never staring at a blank buffer wondering what goes in it. What you get looks like this:
+1. **Name.** Used for the key file, the systemd unit, and the log directory. Allowed characters are letters, digits, dashes, dots, and underscores, and it must start with a letter or digit.
+2. **Repository.** The restic repository that stores your backups, for example `/run/media/you/backup/restic`.
+3. **Source folders.** What gets backed up. The form starts with your home folder. **Add folder...** opens a file browser, which also lists hidden folders such as `.config`, because those are backed up too. The × button removes a folder from the list.
+4. **Password.** Encrypts the backups. The row under the field chooses how it is stored; see below.
+5. **Schedule.** How often backups run. Click the row to cycle through: daily, weekly, monthly, hourly, and custom. The field under it shows the exact time the preset fires, as a systemd `OnCalendar` expression, and it is editable: `*-*-* 03:00:00` can become `*-*-* 05:30:00`, or `Mon..Fri *-*-* 09,17:00:00` for weekdays at 9 and 5. Custom starts with an empty field; leaving it empty means no schedule, so backups run only when started from the panel. The expression is validated when you apply; a typo is refused with a message.
 
-```json
-{
-  "source": "~",
-  "destinations": [
-    {
-      "name": "backup-drive",
-      "display_name": "Backup drive",
-      "repository": "/run/media/CHANGE-ME/backup/restic",
-      "schedule": "*-*-* 03:00:00"
-    }
-  ]
-}
-```
+**Apply** does everything in one step: it writes the config, stores the password, creates the repository with `restic init` if needed, and enables the schedule. Applying an existing destination merges by name: the fields you changed are updated and every setting you did not send (retention, `pre_command`, the password source) survives, so small changes never mean retyping everything. **Cancel** closes the form, and everything you typed stays there until you apply it.
 
-`source` is what gets backed up, `repository` is where it goes, and `schedule` says three in the morning, every morning. Point `repository` at your external drive and you're most of the way there.
+With a configuration already in place, the panel offers **Edit Configuration...**. It opens the setup form pre-filled from the first configured destination: name, repository, schedule, folders and password mode. The mode is detected from the config, so no toggling is needed. When the destination fetches its password with a command, that command is shown in the field, ready to edit -- it is not a secret, the config already holds it in plain text. When the destination uses a key file, the field is left empty because the password itself is never shown back, and the stored password is kept unless you type a new one.
 
-An external drive is the easy case. It also does a NAS over SSH, or a bucket in the cloud:
+If you prefer editing the config directly, choose **Create Configuration** instead. It writes a starter file and opens it in your editor.
+
+## Where backups go
+
+A repository can be a folder, another machine, or cloud storage. Anything restic supports works:
 
 ```json
 { "name": "drive",   "repository": "/run/media/you/backup/restic" }
@@ -65,111 +57,99 @@ An external drive is the easy case. It also does a NAS over SSH, or a bucket in 
 { "name": "offsite", "repository": "s3:s3.amazonaws.com/my-bucket" }
 ```
 
-List more than one and the panel lists them all, each with its own schedule and its own history.
+You can configure any number of destinations. Each one appears in the panel with its own schedule and history.
 
-Anywhere restic can write works: a local disk, SFTP, a REST server, S3, Minio, Wasabi, Backblaze B2, Azure Blob, Google Cloud Storage, Alibaba OSS, OpenStack Swift, or anything rclone can reach. A drive in your bag and a bucket in the cloud is a good pair: one is fast, the other survives your house.
+If the repository URL contains a username and password, percent-encode the password: `p@ss` must be written as `p%40ss`. A raw `@`, `/`, or space makes the URL unreadable to restic.
 
-If a URL carries a username and password, percent-encode the password: `p@ss` becomes `p%40ss`. A raw `/` or space breaks the URL for restic itself, and a password restic cannot parse is also one the panel cannot reliably hide -- percent-encoding is the one form every backend accepts.
+## The backup password
 
-## Pick a password
+Backups are encrypted. If a disk is stolen or a storage account is compromised, the data cannot be read without the password.
 
-Your backups are encrypted, and that's not optional. An external drive gets lost, a NAS gets stolen, a bucket in the cloud sits on somebody else's computer. Encrypted means that when your backup ends up somewhere you didn't intend, it's noise to whoever finds it.
+The password field supports two storage modes, and clicking the row under the field switches between them:
 
-The price of that is a password. Pick one and it gets stored on this machine, so you'll never be asked for it again in normal use:
+- **Stored in a key file.** The text you type is the password itself. It is written to `~/.config/omarchy-time-machine/<name>.key` with mode 600. It is never written to the config file, and it never appears in a process list.
+- **Fetched with a command.** The text you type is a command that prints the password, stored as `password_command` in the config. Examples: `pass show omarchy/backup-drive`, `op read <secret>`, `bw get <item>`. The command runs on this machine whenever a backup runs, so the password manager's CLI must be installed and unlocked here. Scheduled runs have no terminal to prompt in, so the command must answer without asking: keep the agent's passphrase cached or configure loopback pinentry.
 
-```bash
-omarchy-time-machine key set --dest backup-drive
-omarchy-time-machine init --dest backup-drive
-omarchy-time-machine install
-```
-
-Those three lines set the password, prepare the destination, and switch on the nightly schedule. That's the setup done. Go do something else.
-
-This password encrypts only the backup contents. It is not where API keys or storage credentials go -- those belong in the per-destination env file, or in whatever secret store you already use. And it is not one password for everything: every destination has its own.
-
-If you would rather restic fetch this password from somewhere other than the local key file, set `password_command` or `password_file` in the config -- never both -- and the key file is not used at all:
+Setting both a password and a password command is refused. In the config, only one of these may be set:
 
 ```json
+{ "name": "backup-drive", "password_file": "~/.config/omarchy-time-machine/backup-drive.key" }
 { "name": "backup-drive", "password_command": "pass show omarchy/backup-drive" }
 ```
 
-If your secrets live in `pass`, that line is the whole setup: pass handles the gpg underneath, and every backup picks the password up straight from your store. `key set` refuses a destination that uses `password_command`, because a key file would do nothing there -- and the password's recovery plan becomes whatever discipline you already have for that store. One operational caveat: a scheduled run has no terminal to prompt in, so the command has to answer without asking -- keep the gpg passphrase cached or set up loopback pinentry, or the run stops with an error instead of hanging.
+The password encrypts backup contents only. Storage credentials such as S3 access keys belong in the env file described below. Each destination has its own backup password.
 
-## Now save that password somewhere else
+### Keep a copy outside this machine
 
-Read this bit. It's the one thing that quietly makes backups worthless.
-
-Your password is stored in your home folder, and your home folder is what gets backed up. So the copy that ends up inside your backup is locked behind the very password you'd be trying to recover. If this laptop is stolen or dies, your backups are a pile of bytes that nobody can open. Not you, not me, not restic.
+The password is stored in your home folder, and your home folder is a backup source. If the machine is lost, the stored password is lost with it, and nobody can open the backups. Make a second copy now:
 
 ```bash
 omarchy-time-machine key show --dest backup-drive
 ```
 
-Put that in your password manager. Print it and put it in a drawer. Do it today, because the moment you need it is exactly the moment you can't get to it.
+Save the output in your password manager, or print it and store it somewhere physical.
 
-If you use 1Password, there's a shortcut:
+With 1Password:
 
 ```bash
 omarchy-time-machine key save-1password --dest backup-drive
 ```
 
-That writes it into your vault as "Time Machine backup key (backup-drive)", with a note saying which destination it opens. It refuses if an item by that name already exists, because two of them is how you end up trying the wrong one in a year.
+This creates a vault item named "Time Machine backup key (backup-drive)". It refuses to overwrite an item that already exists under that name.
 
-And if your password manager is `pass`, the same one-liner:
+With `pass`:
 
 ```bash
 omarchy-time-machine key show --dest backup-drive | pass insert -m omarchy/backup-drive
 ```
 
-### Credentials beyond the password
+## Extra credentials
 
-Some destinations need more than a password: an access key for a bucket, a token for a rest server. Every destination can carry an env file at `~/.config/omarchy-time-machine/<name>.env` -- or wherever `secrets_file` in the config points -- holding `KEY=VALUE` lines. A `${NAME}` in the repository URL is replaced with the matching value:
+Destinations such as S3 or REST servers need more than the backup password. Each destination can have an env file at `~/.config/omarchy-time-machine/<name>.env`, or at the path configured in `secrets_file`, holding `KEY=VALUE` lines. A `${NAME}` in the repository URL is replaced with the value of `NAME` from that file:
 
 ```json
 { "name": "offsite", "repository": "s3:s3.amazonaws.com/${bucket}" }
 ```
 
-Everything in that file is exported to restic and to the commands the backup runs around it, `pre_command` included. Put in it only what the backup needs: anything there reaches every process a run spawns.
+Everything in the env file is exported to restic and to every command a backup run spawns, so keep it limited to what the backup needs.
 
-## Getting files back
+## Restoring files
 
-Open the panel and hit **Restore Files**. Pick a day, then browse to whatever you're looking for, the same way you'd browse any folder.
+Click the icon and choose **Restore Files**. Pick a destination and a date, then browse the snapshot like any file listing. Arrow keys move the cursor, Enter opens a folder, and typing filters the list. Switching dates keeps your current folder, which makes it easy to compare two days.
+
+You can restore a single file, or the folder you are currently viewing.
+
+Restored files are written to `~/Restored/`, never over your current files. Move them into place yourself so nothing is replaced by accident. When a restore finishes, a notification appears, and clicking it opens your file manager with the restored file selected.
 
 ![Browsing a backup](screenshots/restore.png)
 
-Arrows move through the list, Enter opens a folder, and typing filters what you see. Switch to a different day and you stay in the same folder, so you can flip between Monday and Sunday to spot what changed.
+## Settings
 
-You can bring back a single file, or the whole folder you're standing in.
+Only `name` and `repository` are required. Everything else has a default:
 
-Everything you restore lands in `~/Restored/`, never on top of your current files. That's deliberate. Getting a file back should never destroy the work you did since. You move things into place yourself, where you can see exactly what you're replacing. When a restore finishes you get a notification, and clicking it opens your file manager with the file already selected.
-
-## Things you might want to change
-
-You only need `name` and `repository`. Everything else already has a sensible default.
-
-| Setting | Default | What it's for |
+| Setting | Default | Purpose |
 |---|---|---|
-| `source` | your home folder | What gets backed up. A path, or a list of them: `["~", "/etc", "/srv/data"]`. If one is missing the backup stops rather than quietly taking half of it. |
-| `exclude_file` | `excludes.txt` next to your config | Things to skip. Caches, downloads, virtual machine images. Anything you can get back another way. |
-| `retention` | 7 daily, 4 weekly, 12 monthly, 3 yearly | How far back you can go. Older backups get thinned out rather than kept forever. |
-| `schedule` | none | When it runs. `"*-*-* 03:00:00"` is every night at three. Leave it out and this destination only runs when you press the button. |
-| `display_name` | the `name` | What the panel calls it. "The drive in my bag" reads better than `usb2`. |
-| `pre_command` | none | A command to wake the destination first. See below. |
-| `on_failure_command` | none | A command to run when a backup fails, if a red icon isn't enough. |
+| `source` | your home folder | What gets backed up: one path, or a list like `["~", "/etc", "/srv/data"]`. If a listed path is missing, the backup fails instead of silently skipping it. Editable in the setup form. |
+| `exclude_file` | `excludes.txt` next to the config | Patterns to skip: caches, downloads, VM images. |
+| `retention` | 7 daily, 4 weekly, 12 monthly, 3 yearly | Which backups are kept. Older ones are pruned. |
+| `schedule` | none | When backups run: a preset word (`daily`, `weekly`, `monthly`, `hourly`) or a systemd `OnCalendar` expression such as `Mon..Fri *-*-* 09,17:00:00`. Without a schedule, backups run only when started from the panel. |
+| `display_name` | the `name` | The label shown in the panel. |
+| `pre_command` | none | A command that runs before every backup, to mount or wake the destination. |
+| `on_failure_command` | none | A command that runs when a backup fails. |
 
-Run `omarchy-time-machine install` again after changing a schedule.
+Run `omarchy-time-machine install` after changing a schedule, so the systemd units are rewritten.
 
-Run it once after updating past 1.1.0 as well, even if nothing changed. Timers written before that carried a `Requires=` on the backup service, which meant that stopping a running backup switched the timer off with it: the run you cancelled was the last one that was ever scheduled, and nothing said so. The units are rewritten and re-enabled by that command; until you run it, an already-stopped timer stays stopped.
+Also run it once after updating from a version older than 1.1.0. Timers written before 1.1.0 carried a `Requires=` dependency on the backup service: stopping a running backup also stopped its timer, so no further backups were scheduled. Running `install` rewrites and re-enables the units.
 
-Times show on a 24-hour clock, to match the Omarchy clock next to it. If you'd rather have AM and PM, that's a setting on the widget in `shell.json`:
+Times use a 24-hour clock. For AM/PM, set `timeFormat` on the widget in `shell.json`:
 
 ```json
 { "id": "jankeesvw.time-machine", "timeFormat": "h:mm AP" }
 ```
 
-### If your destination isn't always there
+### Destinations that are not always available
 
-A drive that has to be mounted, a NAS that goes to sleep. Without a nudge the backup fails with an unhelpful "repository not found" and you find out days later.
+An external drive may need to be mounted first, or a NAS may be asleep. Set `pre_command` so the backup can reach it:
 
 ```json
 { "name": "usb",
@@ -177,55 +157,57 @@ A drive that has to be mounted, a NAS that goes to sleep. Without a nudge the ba
   "pre_command": "systemctl --user start mount-backup-disk" }
 ```
 
-Whatever you put there runs first, every time. Keep it quick, and make sure it's harmless to run when the destination is already awake.
+The command runs before every backup. It should be quick, and safe to run when the destination is already available.
 
-## If something goes wrong
+## Troubleshooting
 
-The panel tells you when the last backup failed and when the last good one was, which is usually the thing you actually want to know. For the details:
+The panel shows the time of the last failed backup and of the last successful one. For more detail:
 
 ```bash
-omarchy-time-machine log --dest backup-drive                 # what happened last night
-systemctl --user list-timers 'omarchy-time-machine@*'  # when does it run next
-omarchy-time-machine backup --dest backup-drive --dry-run    # test everything, write nothing
-omarchy-time-machine check --dest backup-drive               # verify the backup isn't damaged
+omarchy-time-machine log --dest backup-drive                 # the last run's log
+systemctl --user list-timers 'omarchy-time-machine@*'  # upcoming schedules
+omarchy-time-machine backup --dest backup-drive --dry-run    # run without writing anything
+omarchy-time-machine check --dest backup-drive               # verify backup integrity
 ```
 
-To see what you have set up and when each one last ran:
+To list destinations and their last run times:
 
 ```
 $ omarchy-time-machine destinations
 NAME           LABEL                  WHERE                                  SCHEDULE       LAST BACKUP
-nas            Synology in the cup... sftp:me@nas:/volume1/backup            *-*-* 03:00:00 2026-08-25 03:07
-usb            Drive in my bag        /run/media/me/backup/restic            on request     2026-08-18 06:50
+nas            Office NAS             sftp:me@nas:/volume1/backup            *-*-* 03:00:00 2026-08-25 03:07
+usb            USB drive              /run/media/me/backup/restic            on request     2026-08-18 06:50
 offsite        Offsite                s3:s3.eu-central-1.amazonaws.com/attic *-*-* 04:30:00 never
 
 35 snapshots, 373 GB stored in total
 ```
 
-That reads your settings and one local file, nothing else, so it answers straight away whether or not the drive is plugged in.
+This reads only the config and one local state file, so it answers immediately whether or not the destination is connected.
 
-You can drive the whole thing from the terminal if you prefer. `omarchy-time-machine` on its own lists what it can do.
+Run `omarchy-time-machine` with no arguments to list all commands.
 
 ## Uninstalling
+
+Removing the plugin leaves your backups, configuration, and schedule in place:
 
 ```bash
 omarchy plugin remove jankeesvw.time-machine
 ```
 
-That removes the widget and leaves your schedule, settings and backup password alone, because taking away a widget shouldn't take away your ability to open your backups. When you want those gone as well:
+To remove the schedule and the stored settings as well:
 
 ```bash
 systemctl --user disable --now 'omarchy-time-machine@*.timer'
 rm -f ~/.config/systemd/user/omarchy-time-machine*
 systemctl --user daemon-reload
 
-rm -rf ~/.config/omarchy-time-machine        # settings and your backup password
-rm -rf ~/.local/state/omarchy-time-machine   # history and logs
+rm -rf ~/.config/omarchy-time-machine        # config and backup passwords
+rm -rf ~/.local/state/omarchy-time-machine   # run history and logs
 ```
 
-Careful with the first one. It holds the password to your backups, and deleting it without a copy elsewhere makes them permanently unreadable. The second holds a record of when each backup ran, plus a log of every run for the last thirty days, which includes the names of files that couldn't be read.
+`~/.config/omarchy-time-machine` holds the backup passwords. Deleting it without another copy makes the backups permanently unreadable. `~/.local/state/omarchy-time-machine` holds run history and thirty days of logs, including the names of files that could not be read.
 
-None of this touches the backups themselves. They stay exactly where they are, and anyone with the password can still open them.
+The backups themselves are never removed by any of these commands. Anyone with the password can still open them.
 
 ## Licence
 

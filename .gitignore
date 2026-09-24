@@ -2,3 +2,6 @@
 *.swp
 .DS_Store
 .gstack/
+
+# Cortex runtime state (memory + RAG index, regenerable)
+.cortex/

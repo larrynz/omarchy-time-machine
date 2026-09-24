@@ -53,6 +53,10 @@ Singleton {
   property bool configInvalid: false
   property string configError: ""
   property var destinations: []
+  // The folders to back up, from the status's `source` array. The setup form
+  // seeds its folder list from this, so a re-setup shows what is really
+  // configured instead of silently replacing it with just the home folder.
+  property var sources: []
   // The first destination, used where something has to pick one on its own.
   // There is no "active" destination any more: with several of them they all
   // run on their own schedule and they all matter.
@@ -106,6 +110,7 @@ Singleton {
     root.configInvalid = payload.invalid === true
     root.configError = payload.error ? String(payload.error) : ""
     root.destinations = payload.destinations || []
+    root.sources = payload.source || []
 
     root.loaded = true
   }
@@ -270,6 +275,26 @@ Singleton {
     return d.last_run ? d.last_run.result === "failed" : false
   }
 
+  // The audit's verdict on the newest backup: what comparing the disk with
+  // the snapshot found. Only unreadable paths are a problem, so the message
+  // says either that everything checked out or how much did not. Written by
+  // the audit that runs after every backup, so it always describes the most
+  // recent one -- a clean verdict after a failed run means the failure was
+  // not unreadable files.
+  function destinationAudit(d) {
+    if (!d.last_audit) return ""
+    var n = d.last_audit.unreadable
+    if (n === undefined || n === null) return ""
+    if (Number(n) === 0) return "Audit: every file verified"
+    return "Audit: " + n + (Number(n) === 1 ? " file" : " files") + " unreadable"
+  }
+
+  function auditHasProblems(d) {
+    if (!d.last_audit) return false
+    var n = d.last_audit.unreadable
+    return n !== undefined && n !== null && Number(n) > 0
+  }
+
   function startBackup() {
     if (!active || running) return
     startProc.command = ["systemctl", "--user", "start", "--no-block",
@@ -339,17 +364,23 @@ Singleton {
 
   // --- guided setup ---------------------------------------------------------
 
-  // The setup screen runs one command: apply-setup reads its document on
-  // stdin, validates it against the same rules the units will get, and does
-  // everything a first run needs -- config, key, repository, timers. The
-  // password travels inside the document, on stdin, never on a command line:
-  // a command line is readable by any process on the machine, stdin is not.
-  // write() drops its data when the process is not running yet, so the
-  // document is written on the started signal, not before.
+  // The setup screen runs one command: apply-setup validates its document
+  // against the same rules the units will get, and does everything a first
+  // run needs -- config, key, repository, timers. The document is staged to
+  // a 0600 temp file under XDG_RUNTIME_DIR and handed over with --file.
+  // Earlier it traveled on stdin via Process.write(), but Quickshell has no
+  // closeStdin(): the pipe's write end stays open, the CLI's `cat` never
+  // sees EOF, and apply-setup hangs forever -- the panel sat on "Applying…"
+  // with the CLI blocked in anon_pipe_read. A file keeps the password off
+  // the command line either way: the short-lived writer receives it through
+  // its environment (same-user readable only, milliseconds of life) and the
+  // file is removed the moment the CLI exits.
   property bool setupBusy: false
   property string setupError: ""
   property string setupDone: ""
   property string setupPendingDoc: ""
+  readonly property string applyTmpFile:
+    (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omarchy-time-machine-apply.json"
 
   function applySetup(doc) {
     if (setupBusy) return
@@ -357,13 +388,28 @@ Singleton {
     setupError = ""
     setupDone = ""
     setupPendingDoc = JSON.stringify(doc)
-    applyProc.command = [root.cli, "apply-setup"]
-    applyProc.running = true
+    applyFileProc.running = true
+  }
+
+  // Stages the pending document, then hands off to the CLI. The document
+  // travels in an environment variable, never on a command line.
+  Process {
+    id: applyFileProc
+    environment: ({ TM_DOC: setupPendingDoc })
+    command: ["bash", "-c", "umask 077; printf '%s' \"$TM_DOC\" > \"$XDG_RUNTIME_DIR/omarchy-time-machine-apply.json\""]
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.setupBusy = false
+        root.setupError = "could not stage the setup document"
+        return
+      }
+      applyProc.command = [root.cli, "apply-setup", "--file", root.applyTmpFile]
+      applyProc.running = true
+    }
   }
 
   Process {
     id: applyProc
-    onStarted: write(setupPendingDoc)
     stdout: StdioCollector {
       onStreamFinished: {
         // The install step prints systemctl's timer table, which wrapped at
@@ -386,9 +432,18 @@ Singleton {
     // whole plugin load -- bar glyph, panel, everything. qmllint does not
     // catch it; the journal does.
     onExited: function(exitCode, exitStatus) {
+      cleanupProc.running = true
       root.setupBusy = false
       root.refresh()
     }
+  }
+
+  // Removes the staged document as soon as the CLI is done with it: the file
+  // carries the password, so it must not outlive the apply, whichever way
+  // the apply ends.
+  Process {
+    id: cleanupProc
+    command: ["rm", "-f", "--", root.applyTmpFile]
   }
 
   // --- snapshots ----------------------------------------------------------
