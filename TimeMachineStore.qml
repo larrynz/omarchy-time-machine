@@ -57,6 +57,10 @@ Singleton {
   // seeds its folder list from this, so a re-setup shows what is really
   // configured instead of silently replacing it with just the home folder.
   property var sources: []
+  // Whether this machine has omarchy-snapshot at all: the setup form offers
+  // the snapshot toggle only when this is true, so on a plain Arch box the
+  // plugin never shows a control that cannot work.
+  property bool systemSnapshotAvailable: false
   // The first destination, used where something has to pick one on its own.
   // There is no "active" destination any more: with several of them they all
   // run on their own schedule and they all matter.
@@ -111,6 +115,7 @@ Singleton {
     root.configError = payload.error ? String(payload.error) : ""
     root.destinations = payload.destinations || []
     root.sources = payload.source || []
+    root.systemSnapshotAvailable = payload.system_snapshot_available === true
 
     root.loaded = true
   }
@@ -293,6 +298,27 @@ Singleton {
     if (!d.last_audit) return false
     var n = d.last_audit.unreadable
     return n !== undefined && n !== null && Number(n) > 0
+  }
+
+  // The system snapshot paired with the newest backup, when the destination
+  // asked for one. Every verdict except "created" explains itself: a toggle
+  // that looks on must say why nothing was taken, or the user stops believing
+  // the line. Reads from last_run, so a run that crashed before record_status
+  // leaves the previous verdict standing, like every other last_run field.
+  function destinationSnapshot(d) {
+    if (!d.last_run || !d.last_run.system_snapshot) return ""
+    var s = d.last_run.system_snapshot
+    if (s.result === "created") return "System snapshot: taken"
+    if (s.reason) return "System snapshot: " + s.result + " \u2014 " + s.reason
+    return "System snapshot: " + s.result
+  }
+
+  // Urgent when the newest run wanted a snapshot and did not get one. A
+  // "created" snapshot is the ordinary state of a working setup; anything
+  // else is a problem the reason string names.
+  function destinationSnapshotProblem(d) {
+    if (!d.last_run || !d.last_run.system_snapshot) return false
+    return d.last_run.system_snapshot.result !== "created"
   }
 
   function startBackup() {

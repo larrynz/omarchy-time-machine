@@ -928,6 +928,174 @@ check $? "install regenerates the timer from the current config"
 cp "$WORK/config.bak" "$CONFIG"
 $CLI install >/dev/null 2>&1 || true
 
+# --- system snapshot --------------------------------------------------------
+
+group_restic "System snapshot"
+
+# The runner hands whatever OMARCHY_SNAPSHOT_CMD names to `sudo -n`, and on a
+# machine without a matching sudoers line real sudo would refuse every call.
+# A fake sudo on PATH stands in for it: the classification, the command it
+# runs and the verdicts it records are all real; only the privilege
+# escalation is simulated.
+mkdir -p "$WORK/fakebin"
+cat > "$WORK/fakebin/sudo" <<'SH'
+#!/bin/bash
+# Test double for sudo: drops -n and --, runs the command unchanged.
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -n) shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+exec "$@"
+SH
+chmod +x "$WORK/fakebin/sudo"
+OLD_PATH="$PATH"
+export PATH="$WORK/fakebin:$PATH"
+
+FAKE="$WORK/fake-omarchy-snapshot"
+MARK="$WORK/snapshot-ran"
+export OMARCHY_TIME_MACHINE_TEST_MARK="$MARK"
+
+# A destination of its own, so the rest of the suite's state stays untouched.
+mkdir -p "$WORK/snap-repo"
+jq --arg r "$WORK/snap-repo" '.destinations += [{name:"snap", repository:$r, system_snapshot:true}]' \
+  "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
+printf 'snap-password\n' | $CLI key set --dest snap >/dev/null 2>&1
+check $? "the snapshot destination gets a key"
+
+$CLI init --dest snap >/dev/null 2>&1
+check $? "init creates the snapshot destination's repository"
+
+# created: the fake checks its own argument, drops a mark file, exits 0.
+cat > "$FAKE" <<'SH'
+#!/bin/bash
+[ "$1" = "create" ] || exit 9
+: > "$OMARCHY_TIME_MACHINE_TEST_MARK"
+echo "Create system snapshot"
+echo "Snapshots can be selected during boot."
+exit 0
+SH
+chmod +x "$FAKE"
+export OMARCHY_SNAPSHOT_CMD="$FAKE"
+rm -f -- "$MARK"
+$CLI backup --dest snap >/dev/null 2>&1
+check $? "a backup with a green snapshot run stays green"
+[ -f "$MARK" ]
+check $? "the snapshot command ran"
+$CLI status --json | jq -e '.destinations[] | select(.name=="snap") | .last_run.system_snapshot == {result:"created", reason:null}' >/dev/null 2>&1
+check $? "a created snapshot is recorded with no reason"
+
+# needs-sudo: sudo's own refusal, surfaced through the command's output.
+cat > "$FAKE" <<'SH'
+#!/bin/bash
+echo "sudo: a password is required" >&2
+exit 1
+SH
+$CLI backup --dest snap >/dev/null 2>&1
+check $? "a needs-sudo snapshot does not fail the backup"
+$CLI status --json | jq -e '.destinations[] | select(.name=="snap") | .last_run.system_snapshot.result == "needs-sudo"' >/dev/null 2>&1
+check $? "a missing sudoers line is classified as needs-sudo"
+$CLI status --json | jq -r '.destinations[] | select(.name=="snap") | .last_run.system_snapshot.reason' | grep -q README
+check $? "the needs-sudo verdict points at the README"
+
+# snapper-missing: omarchy-snapshot's own silent exit 127.
+cat > "$FAKE" <<'SH'
+#!/bin/bash
+exit 127
+SH
+$CLI backup --dest snap >/dev/null 2>&1
+$CLI status --json | jq -e '.destinations[] | select(.name=="snap") | .last_run.system_snapshot == {result:"snapper-missing", reason:"snapper is not installed"}' >/dev/null 2>&1
+check $? "exit 127 is classified as snapper-missing"
+
+# snapper-unconfigured: the script's own message, sniffed from the output.
+cat > "$FAKE" <<'SH'
+#!/bin/bash
+echo "No Snapper configs found, so no snapshot was created." >&2
+echo "Configure Snapper with: sudo bash -euo pipefail snapper.sh" >&2
+exit 1
+SH
+$CLI backup --dest snap >/dev/null 2>&1
+$CLI status --json | jq -e '.destinations[] | select(.name=="snap") | .last_run.system_snapshot.result == "snapper-unconfigured"' >/dev/null 2>&1
+check $? "the no-snapper-configs message is classified"
+
+# A wedged snapshot must not hold the run: the timeout turns into a verdict.
+cat > "$FAKE" <<'SH'
+#!/bin/bash
+sleep 3
+exit 0
+SH
+SYSTEM_SNAPSHOT_TIMEOUT=1 $CLI backup --dest snap >/dev/null 2>&1
+check $? "a wedged snapshot does not fail the backup either"
+$CLI status --json | jq -e '.destinations[] | select(.name=="snap") | .last_run.system_snapshot.result == "failed"' >/dev/null 2>&1
+check $? "a timed-out snapshot is classified as failed"
+$CLI status --json | jq -r '.destinations[] | select(.name=="snap") | .last_run.system_snapshot.reason' | grep -q "timed out"
+check $? "the timeout verdict says so"
+
+# unavailable: an override that does not resolve fails closed, and the form
+# learns it from status, not from a failed run.
+export OMARCHY_SNAPSHOT_CMD="$WORK/no-such-snapshot"
+$CLI status --json | jq -e '.system_snapshot_available == false' >/dev/null 2>&1
+check $? "status reports the machine cannot take snapshots"
+$CLI backup --dest snap >/dev/null 2>&1
+check $? "an unavailable snapshot does not fail the backup"
+$CLI status --json | jq -e '.destinations[] | select(.name=="snap") | .last_run.system_snapshot.result == "unavailable"' >/dev/null 2>&1
+check $? "a missing command is classified as unavailable"
+export OMARCHY_SNAPSHOT_CMD="$FAKE"
+
+# Dry run: the one kind of run that must not touch the system.
+cat > "$FAKE" <<'SH'
+#!/bin/bash
+[ "$1" = "create" ] || exit 9
+: > "$OMARCHY_TIME_MACHINE_TEST_MARK"
+exit 0
+SH
+rm -f -- "$MARK"
+$CLI backup --dest snap --dry-run >/dev/null 2>&1
+check $? "a dry run with snapshots enabled succeeds"
+if [ -f "$MARK" ]; then no "a dry run takes no snapshot"; else ok "a dry run takes no snapshot"; fi
+
+# Off by default, silent when off: no invocation, no verdict in last_run.
+jq '(.destinations[] | select(.name=="snap") | .system_snapshot) = false' \
+  "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
+rm -f -- "$MARK"
+$CLI backup --dest snap >/dev/null 2>&1
+check $? "a backup with snapshots off succeeds"
+if [ -f "$MARK" ]; then no "snapshots off means no invocation"; else ok "snapshots off means no invocation"; fi
+$CLI status --json | jq -e '.destinations[] | select(.name=="snap") | .last_run.system_snapshot == null' >/dev/null 2>&1
+check $? "no verdict is recorded when snapshots are off"
+
+# The form reads both flags from status: enabled per destination, available
+# once for the machine.
+$CLI status --json | jq -e '.system_snapshot_available == true' >/dev/null 2>&1
+check $? "status reports the machine can take snapshots"
+$CLI status --json | jq -e '.destinations[] | select(.name=="snap") | .system_snapshot_enabled == false' >/dev/null 2>&1
+check $? "status carries the per-destination toggle, off"
+jq '(.destinations[] | select(.name=="snap") | .system_snapshot) = true' \
+  "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
+$CLI status --json | jq -e '.destinations[] | select(.name=="snap") | .system_snapshot_enabled == true' >/dev/null 2>&1
+check $? "status carries the per-destination toggle, on"
+
+# The setup form round-trips the field: written when sent, kept when omitted,
+# refused when not a boolean.
+OUT="$(printf '%s' '{"name":"snap-setup","repository":"'"$WORK"'/snap-setup-repo","password":"snap-setup-pw","system_snapshot":true}' | $CLI apply-setup 2>&1)"
+check $? "apply-setup accepts a system_snapshot field"
+jq -e '.destinations[] | select(.name=="snap-setup") | .system_snapshot == true' "$CONFIG" >/dev/null 2>&1
+check $? "the config records system_snapshot true"
+
+OUT="$(printf '%s' '{"name":"snap-setup","repository":"'"$WORK"'/snap-setup-repo","password":"snap-setup-pw"}' | $CLI apply-setup 2>&1)"
+check $? "an edit without the field succeeds"
+jq -e '.destinations[] | select(.name=="snap-setup") | .system_snapshot == true' "$CONFIG" >/dev/null 2>&1
+check $? "an edit that omits system_snapshot keeps the setting"
+
+OUT="$(printf '%s' '{"name":"snap-setup","repository":"'"$WORK"'/snap-setup-repo","password":"snap-setup-pw","system_snapshot":"yes"}' | $CLI apply-setup 2>&1)"
+grep -q "system_snapshot must be true or false" <<<"$OUT"
+check $? "apply-setup refuses a non-boolean system_snapshot"
+
+export PATH="$OLD_PATH"
+unset OMARCHY_SNAPSHOT_CMD OMARCHY_TIME_MACHINE_TEST_MARK
+
 # --- result ----------------------------------------------------------------
 
 if [ "$SKIPPED" -gt 0 ]; then

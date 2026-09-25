@@ -55,6 +55,11 @@ SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
 LOG_RETENTION_DAYS=30
 PRE_COMMAND_TIMEOUT=60
+# One attempt at a system snapshot must not hold the backup hostage: snapper
+# create is near-instant on btrfs, so anything still running here is wedged,
+# not slow. Env-overridable only so the test suite can time it out in a second
+# instead of two minutes.
+SYSTEM_SNAPSHOT_TIMEOUT="${SYSTEM_SNAPSHOT_TIMEOUT:-120}"
 LS_ENTRY_CAP=500
 # What restic is allowed to hand back before anything reads it. LS_ENTRY_CAP
 # bounds the rows the widget draws, which is a different job: by the time it
@@ -321,11 +326,15 @@ config_problem() {
   problem="$(jq -r '
     [.destinations[] | .name] as $names
     | ($names | map(select(type == "string" and (test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))))) as $valid
-    | if ($names | length) != ($valid | length)
-      then "every destination needs a name (letters, digits, . _ - allowed). Note that display_name is a label, not a replacement for it."
-      elif ($names | length) != ($names | unique | length)
-      then "duplicate destination names: " + (($names | group_by(.) | map(select(length > 1) | .[0])) | join(", "))
-      else "" end' <<<"$json" 2>/dev/null)"
+    | [(if ($names | length) != ($valid | length)
+        then "every destination needs a name (letters, digits, . _ - allowed). Note that display_name is a label, not a replacement for it."
+        elif ($names | length) != ($names | unique | length)
+        then "duplicate destination names: " + (($names | group_by(.) | map(select(length > 1) | .[0])) | join(", "))
+        else empty end),
+       (.destinations[]
+        | select(has("system_snapshot") and ((.system_snapshot | type) != "boolean"))
+        | "system_snapshot must be true or false")]
+    | join("; ")' <<<"$json" 2>/dev/null)"
 
   [ -z "$problem" ] && return 0
   printf '%s' "$problem"
@@ -548,6 +557,91 @@ run_pre_command() {
   [ "$status" = "0" ] && return 0
   [ "$status" = "124" ] && die "pre_command of $DEST_NAME timed out (>${PRE_COMMAND_TIMEOUT}s)"
   die "pre_command of $DEST_NAME failed (exit $status)"
+}
+
+# The omarchy-snapshot command, by absolute path: the unit's PATH and sudo's
+# secure_path are two different lists, so a bare name resolves differently in
+# each. /usr/bin on current Omarchy, /usr/share for layouts that ship it there
+# -- both root-owned package files. OMARCHY_SNAPSHOT_CMD overrides for the
+# test suite; it only picks the command handed to `sudo -n`, which the
+# sudoers line still gates, so the override grants nothing. An override that
+# does not resolve fails closed -- unavailable, never a silent fallthrough
+# to the real command.
+system_snapshot_cmd() {
+  local p="${OMARCHY_SNAPSHOT_CMD:-}"
+  if [ -n "$p" ]; then
+    [ -x "$p" ] && { printf '%s' "$p"; return 0; }
+    return 1
+  fi
+  for p in /usr/bin/omarchy-snapshot /usr/share/omarchy/bin/omarchy-snapshot; do
+    [ -x "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  return 1
+}
+
+# A system snapshot for the moment the backup runs: a bootable rollback point
+# to pair with the backup, taken with Omarchy's own omarchy-snapshot so the
+# result lands in the boot menu exactly like an update-time snapshot.
+#
+# The whole command runs under `sudo -n`, not the snapper calls it makes
+# internally. One exact-argv sudoers line -- `user ALL=(root) NOPASSWD:
+# /usr/bin/omarchy-snapshot create` -- is then the entire passwordless
+# surface: `restore` stays password-protected, no arbitrary snapper arguments
+# can be reached, and the internal sudos run as root, which never prompts.
+# Without that line `sudo -n` refuses instantly, which is the needs-sudo
+# verdict below -- not a hang, not a failed backup.
+#
+# Every outcome is classified and non-fatal: the backup must not depend on
+# the snapshot, and the panel's verdict has to explain itself.
+run_system_snapshot() {
+  SYS_SNAP_RESULT=""
+  SYS_SNAP_REASON=""
+
+  local cmd out rc
+  cmd="$(system_snapshot_cmd)" || {
+    SYS_SNAP_RESULT=unavailable
+    SYS_SNAP_REASON="omarchy-snapshot is not installed"
+    return 0
+  }
+
+  out="$(timeout "$SYSTEM_SNAPSHOT_TIMEOUT" sudo -n -- "$cmd" create 2>&1)"
+  rc=$?
+
+  case "$rc" in
+    0) SYS_SNAP_RESULT=created; return 0 ;;
+    124|137)
+      SYS_SNAP_RESULT=failed
+      SYS_SNAP_REASON="timed out after ${SYSTEM_SNAPSHOT_TIMEOUT}s"
+      return 0
+      ;;
+  esac
+
+  # sudo's own refusals first: they mean the script never ran at all, so no
+  # later classification could be about the real thing.
+  if grep -q -e 'a password is required' -e 'a terminal is required' <<<"$out"; then
+    SYS_SNAP_RESULT=needs-sudo
+    SYS_SNAP_REASON="passwordless sudo for omarchy-snapshot is required; see System snapshots in the README"
+    return 0
+  fi
+  if grep -q 'No Snapper configs' <<<"$out"; then
+    SYS_SNAP_RESULT=snapper-unconfigured
+    SYS_SNAP_REASON="snapper has no configurations; run Omarchy's snapper setup first"
+    return 0
+  fi
+  case "$rc" in
+    127)
+      # omarchy-snapshot's own exit code for "no snapper on this machine".
+      SYS_SNAP_RESULT=snapper-missing
+      SYS_SNAP_REASON="snapper is not installed"
+      return 0
+      ;;
+  esac
+
+  SYS_SNAP_RESULT=failed
+  SYS_SNAP_REASON="$(grep -m1 -v '^[[:space:]]*$' <<<"$out")"
+  SYS_SNAP_REASON="$(trim "${SYS_SNAP_REASON:-}")"
+  [ -n "$SYS_SNAP_REASON" ] || SYS_SNAP_REASON="omarchy-snapshot exited with code $rc"
+  return 0
 }
 
 # An interrupted run leaves a lock behind that the next run trips over. restic
@@ -1002,6 +1096,12 @@ cmd_status() {
       pwmode=""
     fi
 
+    # The system-snapshot toggle: enabled is what this destination's config
+    # says; available -- reported once, below the loop -- is what this machine
+    # can do. The form needs both to decide whether the toggle is offered.
+    local ssnap
+    ssnap="$(jq -r --arg n "$name" '.destinations[] | select(.name==$n) | (.system_snapshot == true)' <<<"$CONFIG_JSON")"
+
     out="$(jq -c \
       --arg name "$name" \
       --arg label "$(jq -r --arg n "$name" '.destinations[] | select(.name==$n) | .display_name // $n' <<<"$CONFIG_JSON")" \
@@ -1012,10 +1112,12 @@ cmd_status() {
       --argjson progress "$progress" \
       --arg pwmode "$pwmode" \
       --arg pwc "$pwc" \
+      --argjson ssnap "$ssnap" \
       '. + [$stored + {name:$name, display_name:$label,
                        schedule:(if $schedule == "" then null else $schedule end),
                        running:$running,
                        password_mode:$pwmode,
+                       system_snapshot_enabled:$ssnap,
                        password_command:(if $pwc == "" then null else $pwc end),
                        repository_display:(if $repo == "" then ($stored.repository_display // "") else $repo end),
                        progress:(if $running then $progress else null end)}]' <<<"$out")"
@@ -1026,8 +1128,15 @@ cmd_status() {
   local src
   src="$(cfg 'if (.source | type) == "array" then .source else [(.source // empty)] end')"
   [ -n "$src" ] || src='[]'
+  # Whether this machine could take a system snapshot at all: the form offers
+  # the toggle only where omarchy-snapshot exists, so on a plain Arch box the
+  # plugin never shows a control that cannot work.
+  local snap_available=false
+  system_snapshot_cmd >/dev/null 2>&1 && snap_available=true
   jq -nc --argjson d "$out" --argjson installed "$installed" --argjson src "$src" \
-    '{ok:true, configured:true, invalid:false, units_installed:$installed, source:$src, destinations:$d}'
+    --argjson snapavail "$snap_available" \
+    '{ok:true, configured:true, invalid:false, units_installed:$installed, source:$src,
+      system_snapshot_available:$snapavail, destinations:$d}'
 }
 
 cmd_init() {
@@ -1190,6 +1299,23 @@ cmd_backup() {
   [ "$OPT_DRY_RUN" = "1" ] && log_line "DRY RUN: nothing will be written"
   log_line ""
 
+  # The system snapshot, when this destination asked for one: a bootable
+  # rollback point taken at the moment the backup runs. Before anything that
+  # can fail the run -- a snapshot on a night when restic never reached the
+  # repository is still a valid rollback point, and snapper's number cleanup
+  # keeps the pool small either way. One attempt, classified, never fatal.
+  SYS_SNAP_RESULT=""
+  SYS_SNAP_REASON=""
+  if [ "$(dest '.system_snapshot // false')" = "true" ]; then
+    if [ "$OPT_DRY_RUN" = "1" ]; then
+      log_line "System snapshot: skipped (dry run)"
+    else
+      run_system_snapshot
+      log_line "System snapshot: $SYS_SNAP_RESULT"
+      [ -n "$SYS_SNAP_REASON" ] && log_line "Because: $SYS_SNAP_REASON"
+    fi
+  fi
+
   progress_write running pre 1
   run_pre_command
 
@@ -1274,7 +1400,8 @@ cmd_backup() {
     prune_old_logs
   fi
 
-  [ "$OPT_DRY_RUN" = "1" ] || record_status "$started" "$started_epoch" "$backup_exit" "$result" "$summary"
+  [ "$OPT_DRY_RUN" = "1" ] ||
+    record_status "$started" "$started_epoch" "$backup_exit" "$result" "$summary" "$SYS_SNAP_RESULT" "$SYS_SNAP_REASON"
 
   progress_write "$([ "$result" = "failed" ] && echo failed || echo done)" backup 1 \
     "$(jq -nc --arg r "$result" '{percent:1.0, result:$r}')"
@@ -1586,6 +1713,9 @@ last_error_line() {
 
 record_status() {
   local started="$1" started_epoch="$2" exit_code="$3" result="$4" summary="$5"
+  # The system snapshot that preceded the backup, if this destination asked
+  # for one: classified in run_system_snapshot, empty when none ran.
+  local snap_result="${6:-}" snap_reason="${7:-}"
   local status snapshot_count repo_size finished finished_epoch duration
 
   finished="$(date -Iseconds)"
@@ -1631,6 +1761,8 @@ record_status() {
     --argjson duration "$duration" \
     --argjson exit_code "$(number_or "$exit_code" 1)" \
     --argjson summary "$summary" \
+    --arg snapr "$snap_result" \
+    --arg snapwhy "$snap_reason" \
     --argjson count "$snapshot_count" \
     --argjson size "$repo_size" \
     '
@@ -1649,7 +1781,11 @@ record_status() {
           data_added_bytes: ($summary.data_added // null),
           total_files: ($summary.total_files_processed // null),
           error: (if $reason == "" then null else $reason end),
-          log_file: $logfile
+          log_file: $logfile,
+          system_snapshot: (if $snapr == "" then null
+                            else {result: $snapr,
+                                  reason: (if $snapwhy == "" then null else $snapwhy end)}
+                            end)
         }
       })
     | if $result != "failed" then .destinations[$name].last_success_at = $finished else . end
@@ -1917,7 +2053,8 @@ apply_setup_preset() {
 
 # One command for a setup screen. Takes a small JSON document on stdin:
 #   {"name": "backup", "repository": "/mnt/x/restic", "schedule": "daily",
-#    "display_name": "Backup", "password": "...", "source": ["~", "/mnt/data"]}
+#    "display_name": "Backup", "password": "...", "source": ["~", "/mnt/data"],
+#    "system_snapshot": false}
 # Validates it against the same rules the units will get, merges it into
 # config.json -- the document's fields overwrite any destination of the same
 # name and the rest of that destination survives, so applying
@@ -1971,6 +2108,18 @@ cmd_apply_setup() {
     schedule=""
   fi
 
+  # The system-snapshot toggle, when the document carries one. Unlike the
+  # schedule, absence means "unchanged", not "off": the form seeds the
+  # toggle from the config and always sends its state, while a hand-written
+  # document that leaves the field out must not silently switch snapshots
+  # off.
+  local syssnap=""
+  if jq -e 'has("system_snapshot")' <<<"$doc" >/dev/null 2>&1; then
+    jq -e '(.system_snapshot | type) == "boolean"' <<<"$doc" >/dev/null 2>&1 \
+      || die "system_snapshot must be true or false"
+    syssnap="$(jq -c '{system_snapshot: .system_snapshot}' <<<"$doc")"
+  fi
+
   # The folders to back up: a string or an array from the setup document,
   # normalized to an array in the config. Each entry must be a non-empty
   # absolute or tilde path -- a relative path would resolve against the
@@ -2010,7 +2159,10 @@ cmd_apply_setup() {
 
   local obj
   obj="$(jq -cn --arg n "$name" --arg dn "$display_name" --arg r "$repository" --arg s "$schedule" \
-    '{name: $n, display_name: $dn, repository: $r} + (if $s == "" then {} else {schedule: $s} end)')"
+    --argjson ss "${syssnap:-null}" \
+    '{name: $n, display_name: $dn, repository: $r}
+     + (if $s == "" then {} else {schedule: $s} end)
+     + (if $ss == null then {} else $ss end)')"
   if [ "$fresh" = "1" ]; then
     CONFIG_JSON="$(jq --argjson d "$obj" '.destinations = [$d]' <<<"$CONFIG_JSON")" \
       || die "could not set the destination in the configuration"
@@ -2411,16 +2563,19 @@ demo_status_json() {
 
   jq -nc --argjson now "$(date +%s)" '
     def iso($t): $t | strftime("%Y-%m-%dT%H:%M:%S+00:00");
-    {ok:true, configured:true, invalid:false, units_installed:true, destinations:[
+    {ok:true, configured:true, invalid:false, units_installed:true, system_snapshot_available:true, destinations:[
       {name:"nas", display_name:"Synology NAS", schedule:"*-*-* 03:00:00", running:false, progress:null,
+       system_snapshot_enabled:true,
        repository_display:"rest:http://10.0.0.4:8000/",
        last_run:{started_at:iso($now-11100), finished_at:iso($now-11040),
                  duration_seconds:64, exit_code:0, result:"ok",
                  snapshot_id:"7f21ac9e4b13d05a", files_new:812, files_changed:341,
                  data_added_bytes:486539264, total_files:1284551, error:null,
-                 log_file:"~/.local/state/omarchy-time-machine/logs/nas/latest.log"},
+                 log_file:"~/.local/state/omarchy-time-machine/logs/nas/latest.log",
+                 system_snapshot:{result:"created", reason:null}},
        last_success_at:iso($now-11040), snapshot_count:26, repo_size_bytes:201863462912},
       {name:"usb", display_name:"Drive in my bag", schedule:null, running:false, progress:null,
+       system_snapshot_enabled:false,
        repository_display:"/run/media/backup/restic",
        last_run:{started_at:iso($now-579600), finished_at:iso($now-578400),
                  duration_seconds:1204, exit_code:0, result:"ok",
@@ -2428,11 +2583,13 @@ demo_status_json() {
                  data_added_bytes:7516192768, total_files:1281003, error:null, log_file:null},
        last_success_at:iso($now-578400), snapshot_count:9, repo_size_bytes:198642073600},
       {name:"offsite", display_name:"Offsite", schedule:"*-*-* 04:30:00", running:false, progress:null,
+       system_snapshot_enabled:true,
        repository_display:"s3:s3.eu-central-1.amazonaws.com/attic",
        last_run:{started_at:iso($now-97200), finished_at:iso($now-95400),
                  duration_seconds:1783, exit_code:0, result:"ok",
                  snapshot_id:"1ae55c30bb9f4d72", files_new:602, files_changed:288,
-                 data_added_bytes:314572800, total_files:1283990, error:null, log_file:null},
+                 data_added_bytes:314572800, total_files:1283990, error:null, log_file:null,
+                 system_snapshot:{result:"created", reason:null}},
        last_success_at:iso($now-95400), snapshot_count:14, repo_size_bytes:203234050048}
     ]}'
 }
@@ -2443,7 +2600,7 @@ demo_status_running() {
   # of other people's history push it into the noise.
   jq -nc --argjson now "$(date +%s)" '
     def iso($t): $t | strftime("%Y-%m-%dT%H:%M:%S+00:00");
-    {ok:true, configured:true, invalid:false, units_installed:true, destinations:[
+    {ok:true, configured:true, invalid:false, units_installed:true, system_snapshot_available:true, destinations:[
       {name:"nas", display_name:"Synology NAS", schedule:"*-*-* 03:00:00", running:true,
        repository_display:"rest:http://10.0.0.4:8000/",
        progress:{state:"running", kind:"backup", phase:"backup", percent:0.42,
@@ -2459,11 +2616,14 @@ demo_status_running() {
 demo_status_failed() {
   jq -nc --argjson now "$(date +%s)" '
     def iso($t): $t | strftime("%Y-%m-%dT%H:%M:%S+00:00");
-    {ok:true, configured:true, invalid:false, units_installed:true, destinations:[
+    {ok:true, configured:true, invalid:false, units_installed:true, system_snapshot_available:true, destinations:[
       {name:"nas", display_name:"Synology NAS", schedule:"*-*-* 03:00:00", running:false, progress:null,
+       system_snapshot_enabled:true,
        repository_display:"rest:http://10.0.0.4:8000/",
        last_run:{finished_at:iso($now-7200), result:"failed", exit_code:10,
-                 error:"repository does not exist: unable to open config file"},
+                 error:"repository does not exist: unable to open config file",
+                 system_snapshot:{result:"needs-sudo",
+                                  reason:"passwordless sudo for omarchy-snapshot is required; see System snapshots in the README"}},
        last_success_at:iso($now-266400), snapshot_count:26, repo_size_bytes:201863462912},
       {name:"usb", display_name:"Drive in my bag", schedule:null, running:false, progress:null,
        repository_display:"/run/media/backup/restic",

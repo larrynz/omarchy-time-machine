@@ -2,7 +2,7 @@
 
 Time Machine is a backup plugin for Omarchy. It uses [restic](https://restic.net) to copy your folders to a destination you choose, on a schedule you choose, and it shows one icon in your bar. The icon is green when the latest backup succeeded and red when it did not, so you never have to open anything to know whether your backups are working.
 
-Backups are kept according to a retention schedule: by default 7 daily, 4 weekly, 12 monthly, and 3 yearly snapshots, with older ones pruned automatically. Files can be restored from a backup.
+Backups are kept according to a retention schedule: by default 7 daily, 4 weekly, 12 monthly, and 3 yearly snapshots, with older ones pruned automatically. Files can be restored from a backup. Each backup can also take a system snapshot: a bootable rollback point that appears in the boot menu, taken at the moment the backup runs. It is optional, and needs a one-time sudoers line; see [System snapshots](#system-snapshots).
 
 ![Time Machine](screenshots/panel.png)
 
@@ -33,13 +33,14 @@ alias omarchy-time-machine=~/.config/omarchy/plugins/jankeesvw.time-machine/bin/
 
 ## Setting up backups
 
-Click the icon and choose **Setup Backups**. The form has five fields:
+Click the icon and choose **Setup Backups**. The form has six fields:
 
 1. **Name.** Used for the key file, the systemd unit, and the log directory. Allowed characters are letters, digits, dashes, dots, and underscores, and it must start with a letter or digit.
 2. **Repository.** The restic repository that stores your backups, for example `/run/media/you/backup/restic`.
 3. **Source folders.** What gets backed up. The form starts with your home folder. **Add folder...** opens a file browser, which also lists hidden folders such as `.config`, because those are backed up too. The × button removes a folder from the list.
 4. **Password.** Encrypts the backups. The row under the field chooses how it is stored; see below.
 5. **Schedule.** How often backups run. Click the row to cycle through: daily, weekly, monthly, hourly, and custom. The field under it shows the exact time the preset fires, as a systemd `OnCalendar` expression, and it is editable: `*-*-* 03:00:00` can become `*-*-* 05:30:00`, or `Mon..Fri *-*-* 09,17:00:00` for weekdays at 9 and 5. Custom starts with an empty field; leaving it empty means no schedule, so backups run only when started from the panel. The expression is validated when you apply; a typo is refused with a message.
+6. **System snapshot.** Also take a bootable system snapshot with each backup. It needs a one-time sudoers line; see [System snapshots](#system-snapshots).
 
 **Apply** does everything in one step: it writes the config, stores the password, creates the repository with `restic init` if needed, and enables the schedule. Applying an existing destination merges by name: the fields you changed are updated and every setting you did not send (retention, `pre_command`, the password source) survives, so small changes never mean retyping everything. **Cancel** closes the form, and everything you typed stays there until you apply it.
 
@@ -103,6 +104,45 @@ With `pass`:
 omarchy-time-machine key show --dest backup-drive | pass insert -m omarchy/backup-drive
 ```
 
+## System snapshots
+
+Omarchy keeps its own system snapshots with snapper, and they can be selected during boot. This plugin can take one with every backup, so each restic backup is paired with a bootable "the system as it backed itself up" rollback point, taken with Omarchy's own command `omarchy-snapshot create` just before the backup starts.
+
+Turn it on in the setup form with **Also take a system snapshot**. It is off by default, and the row is offered only on machines that have `omarchy-snapshot`, which is every Omarchy install.
+
+One attempt per backup, a two-minute timeout, and the outcome is reported in the panel under the destination:
+
+- **System snapshot: taken** - the rollback point exists in the boot menu.
+- **System snapshot: needs-sudo** - scheduled runs have no terminal to type a password in, and the sudoers line below is not there yet. The backup itself still ran.
+- **System snapshot: snapper-missing** or **snapper-unconfigured** - snapper is not installed, or has no configuration. Run Omarchy's snapper setup and it clears on the next run.
+- **System snapshot: failed** - anything else, with the command's own message shown.
+
+A snapshot problem never fails the backup. The two are paired, but the backup is the thing that must work, so a wedged or refused snapshot turns into one honest line and the backup proceeds.
+
+### The one-time sudoers line
+
+A scheduled run happens in a systemd user service, which has no terminal. Give the command passwordless sudo with one exact line:
+
+```bash
+sudo visudo -f /etc/sudoers.d/omarchy-time-machine-snapshot
+```
+
+with this content, replacing `youruser` with your username:
+
+```sudoers
+youruser ALL=(root) NOPASSWD: /usr/bin/omarchy-snapshot create
+```
+
+That line grants exactly one thing: running `omarchy-snapshot create` as root without a password. The destructive sibling `omarchy-snapshot restore` stays password-protected, no other command or argument is reachable through the line, and the `sudo snapper` calls the script makes internally need no rules of their own, because they run as root, which sudo never prompts.
+
+It is a real, if small, widening of what programs running as you can do: they can also create system snapshots without a password. Creating one is the least destructive thing the command does, and snapper's number cleanup keeps the pool at five snapshots, so nothing accumulates.
+
+### What to expect
+
+- **Snapshot history is short and shared.** Snapper's default `NUMBER_LIMIT` is 5, and Omarchy's update snapshots draw from the same pool, so a nightly backup snapshot is gone from the boot menu within days. The promise is "a recent rollback point", not "the system state at every backup kept". Raise `NUMBER_LIMIT` in `/etc/snapper/configs/root` if you want the deeper kind.
+- **Boot menu entries are labelled with the Omarchy version**, the same label an update snapshot gets, so the menu itself cannot tell the two apart.
+- **A missed night runs at your next login.** If the machine was off, or you were not logged in, at the scheduled time, the persistent timer runs the missed backup when you next log in, and the snapshot describes the system as it is at that moment, the same moment the backup describes. Booting the machine is never affected: nothing here touches the boot process, and the new entry only appears in the menu afterwards.
+
 ## Extra credentials
 
 Destinations such as S3 or REST servers need more than the backup password. Each destination can have an env file at `~/.config/omarchy-time-machine/<name>.env`, or at the path configured in `secrets_file`, holding `KEY=VALUE` lines. A `${NAME}` in the repository URL is replaced with the value of `NAME` from that file:
@@ -136,6 +176,7 @@ Only `name` and `repository` are required. Everything else has a default:
 | `display_name` | the `name` | The label shown in the panel. |
 | `pre_command` | none | A command that runs before every backup, to mount or wake the destination. |
 | `on_failure_command` | none | A command that runs when a backup fails. |
+| `system_snapshot` | off | Also take a system snapshot with each backup, with `omarchy-snapshot`. Needs a one-time sudoers line; see [System snapshots](#system-snapshots). |
 
 Run `omarchy-time-machine install` after changing a schedule, so the systemd units are rewritten.
 

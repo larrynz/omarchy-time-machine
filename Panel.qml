@@ -49,6 +49,10 @@ Panel {
   property string pickerPath: "/run/media"
   property string setupValidationError: ""
   property string setupSchedule: "daily"
+  // The system-snapshot toggle: pairs a bootable rollback point with each
+  // backup. Seeded from the destination on edit, kept as a draft like every
+  // other field once set.
+  property bool setupSystemSnapshot: false
   // The setup form is editing an existing destination (opened from the main
   // view's "Edit configuration..."). The password field may then stay empty:
   // the destination keeps its password source unless the user types a new
@@ -141,6 +145,7 @@ Panel {
     }
     root.setupPassIsCommand = d.password_mode === "command"
     root.editHasPasswordSource = d.password_mode === "command" || d.password_mode === "key"
+    root.setupSystemSnapshot = d.system_snapshot_enabled === true
     // A password_command is not a secret -- the config holds it in plain
     // text -- so it is shown back in the field, editable. A key file's
     // contents are a secret: the field stays empty, and the stored password
@@ -470,6 +475,22 @@ Panel {
                   textFormat: Text.PlainText
                   elide: Text.ElideRight
                   color: TimeMachineStore.auditHasProblems(modelData) ? root.urgent : root.dimmer
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                // The system snapshot paired with the newest backup, when
+                // the destination asked for one. Urgent when it did not
+                // happen: a toggle that looks on must explain why nothing
+                // was taken. The reason can name the fix, so it wraps rather
+                // than elides.
+                Text {
+                  width: parent.width
+                  visible: text !== ""
+                  text: TimeMachineStore.destinationSnapshot(modelData)
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  color: TimeMachineStore.destinationSnapshotProblem(modelData) ? root.urgent : root.dimmer
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
@@ -960,6 +981,17 @@ Panel {
             }
           }
 
+          MenuRow {
+            width: parent.width
+            visible: TimeMachineStore.systemSnapshotAvailable
+            label: root.setupSystemSnapshot
+                   ? "Also take a system snapshot \u2014 click to turn off"
+                   : "Also take a system snapshot \u2014 click to turn on"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.setupSystemSnapshot = !root.setupSystemSnapshot
+          }
+
           PanelSeparator { width: parent.width; foreground: root.foreground }
 
           Text {
@@ -1062,7 +1094,8 @@ Panel {
                 schedule: schedule,
                 password: root.setupPassIsCommand ? undefined : setupPassword.text,
                 password_command: root.setupPassIsCommand ? setupPassword.text.trim() : undefined,
-                source: root.setupSources.slice()
+                source: root.setupSources.slice(),
+                system_snapshot: root.setupSystemSnapshot
               })
             }
           }
