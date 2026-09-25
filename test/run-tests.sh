@@ -767,6 +767,9 @@ $CLI config create >/dev/null 2>&1
 jq -e '.destinations[0].repository | test("CHANGE-ME")' "$CONFIG" >/dev/null 2>&1
 check $? "config create writes a starter file with an unmistakable placeholder"
 
+jq -e '.destinations[0].system_snapshot == false' "$CONFIG" >/dev/null 2>&1
+check $? "the starter names the system snapshot choice, off by default"
+
 [ "$(stat -c %a "$CONFIG")" = "600" ]
 check $? "and it is not world readable"
 

@@ -2030,7 +2030,8 @@ starter_config() {
       "name": "backup-drive",
       "display_name": "Backup drive",
       "repository": "/run/media/CHANGE-ME/backup/restic",
-      "schedule": "*-*-* 03:00:00"
+      "schedule": "*-*-* 03:00:00",
+      "system_snapshot": false
     }
   ]
 }

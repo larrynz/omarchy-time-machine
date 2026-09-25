@@ -44,7 +44,7 @@ Click the icon and choose **Setup Backups**. The form has six fields:
 
 **Apply** does everything in one step: it writes the config, stores the password, creates the repository with `restic init` if needed, and enables the schedule. Applying an existing destination merges by name: the fields you changed are updated and every setting you did not send (retention, `pre_command`, the password source) survives, so small changes never mean retyping everything. **Cancel** closes the form, and everything you typed stays there until you apply it.
 
-With a configuration already in place, the panel offers **Edit Configuration...**. It opens the setup form pre-filled from the first configured destination: name, repository, schedule, folders and password mode. The mode is detected from the config, so no toggling is needed. When the destination fetches its password with a command, that command is shown in the field, ready to edit -- it is not a secret, the config already holds it in plain text. When the destination uses a key file, the field is left empty because the password itself is never shown back, and the stored password is kept unless you type a new one.
+With a configuration already in place, the panel offers **Edit Configuration...**. It opens the setup form pre-filled from the first configured destination: name, repository, schedule, folders, password mode and the system snapshot toggle. The mode is detected from the config, so no toggling is needed. When the destination fetches its password with a command, that command is shown in the field, ready to edit -- it is not a secret, the config already holds it in plain text. When the destination uses a key file, the field is left empty because the password itself is never shown back, and the stored password is kept unless you type a new one.
 
 If you prefer editing the config directly, choose **Create Configuration** instead. It writes a starter file and opens it in your editor.
 
@@ -108,7 +108,7 @@ omarchy-time-machine key show --dest backup-drive | pass insert -m omarchy/backu
 
 Omarchy keeps its own system snapshots with snapper, and they can be selected during boot. This plugin can take one with every backup, so each restic backup is paired with a bootable "the system as it backed itself up" rollback point, taken with Omarchy's own command `omarchy-snapshot create` just before the backup starts.
 
-Turn it on in the setup form with **Also take a system snapshot**. It is off by default, and the row is offered only on machines that have `omarchy-snapshot`, which is every Omarchy install.
+Turn it on in the setup form with **Also take a system snapshot**. It is off by default, and the row is offered only on machines that have `omarchy-snapshot`, which is every Omarchy install. The setting lives in the config file as `system_snapshot` on each destination, so it can also be changed by hand through **Open Configuration…**. Unlike a schedule change it needs no `omarchy-time-machine install` run afterwards: the backup reads the config when it starts.
 
 One attempt per backup, a two-minute timeout, and the outcome is reported in the panel under the destination:
 
