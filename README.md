@@ -2,7 +2,7 @@
 
 Time Machine is a backup plugin for Omarchy. It uses [restic](https://restic.net) to copy your folders to a destination you choose, on a schedule you choose, and it shows one icon in your bar. The icon is green when the latest backup succeeded and red when it did not, so you never have to open anything to know whether your backups are working.
 
-Backups are kept according to a retention schedule: by default 7 daily, 4 weekly, 12 monthly, and 3 yearly snapshots, with older ones pruned automatically. Files can be restored from a backup. Each backup can also take a system snapshot: a bootable rollback point that appears in the boot menu, taken at the moment the backup runs. It is optional, and needs a one-time sudoers line; see [System snapshots](#system-snapshots).
+Backups are kept according to a retention schedule: by default 7 daily, 4 weekly, 12 monthly, and 3 yearly snapshots, with older ones pruned automatically. Files can be restored from a backup, and a backup can be deleted by hand from the panel, one at a time. Each backup can also take a system snapshot: a bootable rollback point that appears in the boot menu, taken at the moment the backup runs. It is optional, and needs a one-time sudoers line; see [System snapshots](#system-snapshots).
 
 ![Time Machine](screenshots/panel.png)
 
@@ -160,6 +160,14 @@ Click the icon and choose **Restore Files**. Pick a destination and a date, then
 You can restore a single file, or the folder you are currently viewing.
 
 Restored files are written to `~/Restored/`, never over your current files. Move them into place yourself so nothing is replaced by accident. When a restore finishes, a notification appears, and clicking it opens your file manager with the restored file selected.
+
+## Managing backups
+
+Click the icon and choose **Manage Backups**. Pick a destination and a date the same way as in Restore Files, and the picker shows what that backup holds: the folders it was taken from and how many files are in it. **Delete this backup** then asks for a confirmation that spells out the date and the destination, because there is no undo.
+
+Deleting runs `restic forget --prune`: the snapshot is removed and the space it used is reclaimed immediately, not at the next backup. On a large repository that can take a few minutes, and the picker says so while it works. When the delete finishes, a notification appears, and the command's own report, prune output included, lands in the destination's log file.
+
+The retention schedule still runs after every backup; deleting by hand is for the snapshot you want gone now. A delete only ever touches the destination it was aimed at, and a failed delete leaves everything exactly as it was.
 
 ![Browsing a backup](screenshots/restore.png)
 

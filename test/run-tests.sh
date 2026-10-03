@@ -1099,6 +1099,48 @@ check $? "apply-setup refuses a non-boolean system_snapshot"
 export PATH="$OLD_PATH"
 unset OMARCHY_SNAPSHOT_CMD OMARCHY_TIME_MACHINE_TEST_MARK
 
+# --- manage backups ---------------------------------------------------------
+
+group_restic "Manage backups"
+
+# Deleting is the one operation here that cannot be undone, so the suite
+# checks both the command and its effect: the JSON names what was deleted,
+# and the list is shorter by one afterwards. The repo the Backup group built
+# still holds its snapshots, and nothing after this group reads them.
+DEL_ID="$($CLI snapshots --dest test --json | jq -r '.snapshots[0].id')"
+BEFORE="$($CLI snapshots --dest test --json | jq -r '.snapshots | length')"
+OUT="$($CLI delete --dest test --snapshot "$DEL_ID")"
+check $? "delete removes a snapshot and exits 0"
+
+jq -e --arg s "$DEL_ID" '.ok == true and .deleted == $s' <<<"$OUT" >/dev/null 2>&1
+check $? "the JSON output names what was deleted"
+
+AFTER="$($CLI snapshots --dest test --json | jq -r '.snapshots | length')"
+[ "$AFTER" = "$((BEFORE - 1))" ]
+check $? "the snapshot list is shorter by one"
+
+# The delete is a manual action, not a backup: last_run keeps the verdict the
+# backup wrote, and a deletion does not disturb it.
+jq -e '.destinations.test.last_run.result == "ok"' "$STATUS" >/dev/null 2>&1
+check $? "a delete does not disturb last_run"
+
+$CLI delete --dest test 2>/dev/null | jq -e '.ok == false' >/dev/null 2>&1
+check $? "delete refuses to run without a snapshot id"
+
+$CLI delete --dest test --snapshot "zzz" 2>/dev/null | jq -e '.ok == false' >/dev/null 2>&1
+check $? "and it refuses an invalid id"
+
+$CLI delete --dest nope --snapshot 0123abcd 2>/dev/null | jq -e '.ok == false' >/dev/null 2>&1
+check $? "delete refuses an unknown destination"
+
+# Demo mode makes the delete a no-op that still reports success, so the
+# picker can be screenshotted without a repository underneath it.
+$CLI demo on >/dev/null 2>&1
+OUT="$($CLI delete --dest test --snapshot 0123abcd 2>&1)"
+jq -e '.ok == true and .deleted == "0123abcd"' <<<"$OUT" >/dev/null 2>&1
+check $? "demo mode makes delete a no-op that reports success"
+$CLI demo off >/dev/null 2>&1
+
 # --- result ----------------------------------------------------------------
 
 if [ "$SKIPPED" -gt 0 ]; then

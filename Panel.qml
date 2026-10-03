@@ -33,6 +33,7 @@ Panel {
   // KeyboardPanel and simply swaps the content, because a second window would
   // lose keyboard focus on Wayland the moment the first one closed.
   property bool browsing: false
+  property bool managing: false
 
   // The guided first run. Separate from browsing: browsing is reading history
   // and hands the keyboard to the listing, setting up is typing and hands it
@@ -166,6 +167,7 @@ Panel {
   onOpenedChanged: {
     if (!opened) {
       root.browsing = false
+      root.managing = false
       // The picker is a sub-state of setting up, but the close reset above
       // did not cover it: click away while picking and the picker was still
       // visible when the panel reopened -- drawing over the main view until
@@ -183,6 +185,11 @@ Panel {
   onBrowsingChanged: {
     if (browsing) browser.takeFocus()
     else if (!settingUp) keyCatcher.forceActiveFocus()
+  }
+
+  onManagingChanged: {
+    if (managing) manageBrowser.takeFocus()
+    else if (!settingUp && !browsing) keyCatcher.forceActiveFocus()
   }
 
   onSettingUpChanged: {
@@ -305,14 +312,16 @@ Panel {
     // and never re-runs, so the panel would keep the width of whichever view
     // happened to be showing when it opened.
     readonly property int desiredWidth:
-      Style.space(root.browsing ? 460 : (root.settingUp ? 420 : 280))
+      Style.space(root.browsing || root.managing ? 460
+                  : (root.settingUp ? 420 : 280))
     contentWidth: Math.min(desiredWidth,
                            panel.availableCardWidth > 0 ? panel.availableCardWidth : desiredWidth)
     contentHeight: panel.fittedContentHeight(
                      root.browsing ? browser.implicitHeight
+                                   : (root.managing ? manageBrowser.implicitHeight
                                    : (root.pickingRepo ? pickerColumn.implicitHeight
                                    : (root.settingUp ? setupColumn.implicitHeight
-                                                     : mainColumn.implicitHeight)),
+                                                     : mainColumn.implicitHeight))),
                      Style.space(560))
 
     PanelKeyCatcher {
@@ -323,9 +332,9 @@ Panel {
       // in vim navigation -- "j", "k", "l", "h" move the cursor and "x" is
       // delete, all checked before the plain-text fallback. Typing to filter a
       // listing is impossible under it; any word containing one of those
-      // letters would steer the panel instead. While browsing the listing
-      // handles its own keys.
-      blocked: root.browsing || root.settingUp
+      // letters would steer the panel instead. While browsing or managing,
+      // those views handle their own keys.
+      blocked: root.browsing || root.managing || root.settingUp
 
       // ConfirmDialog handles the mouse itself but nothing else: without this
       // an open dialog would swallow Escape and Enter, and the only way out
@@ -336,6 +345,8 @@ Panel {
         else if (root.browsing && browser.confirmOpen) browser.confirmCancel()
         else if (root.browsing && browser.filter !== "") browser.clearFilter()
         else if (root.browsing) root.browsing = false
+        else if (root.managing && manageBrowser.confirmOpen) manageBrowser.confirmCancel()
+        else if (root.managing) root.managing = false
         else if (root.pickingRepo) root.pickingRepo = false
         else if (root.settingUp) root.settingUp = false
         else root.close()
@@ -347,6 +358,8 @@ Panel {
           stopConfirm.opened = false
         } else if (root.browsing && browser.confirmOpen) {
           browser.confirmAccept()
+        } else if (root.managing && manageBrowser.confirmOpen) {
+          manageBrowser.confirmAccept()
         }
       }
 
@@ -360,7 +373,7 @@ Panel {
         // Hidden while browsing AND while setting up: neither of those views
         // hides itself, so a setup form that forgot this line drew straight
         // over the main view -- both visible, overlapping text, unreadable.
-        visible: !root.browsing && !root.settingUp
+        visible: !root.browsing && !root.managing && !root.settingUp
         contentWidth: width
         contentHeight: mainColumn.implicitHeight
         clip: true
@@ -603,6 +616,19 @@ Panel {
             }
           }
 
+          MenuRow {
+            width: parent.width
+            visible: TimeMachineStore.configured
+            label: "Manage Backups\u2026"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: {
+              root.managing = true
+              if (!TimeMachineStore.snapshotsLoaded || TimeMachineStore.snapshotsStale())
+                TimeMachineStore.loadSnapshots()
+            }
+          }
+
           PanelSeparator { width: parent.width; foreground: root.foreground }
 
           // Small changes to an existing setup should not mean retyping
@@ -653,6 +679,18 @@ Panel {
         urgent: root.urgent
         fontFamily: root.fontFamily
         onBack: root.browsing = false
+      }
+
+      ManageBrowser {
+        id: manageBrowser
+        anchors.fill: parent
+        visible: root.managing
+        foreground: root.foreground
+        dim: root.dim
+        accent: root.accent
+        urgent: root.urgent
+        fontFamily: root.fontFamily
+        onBack: root.managing = false
       }
 
       // --- setup view --------------------------------------------------------

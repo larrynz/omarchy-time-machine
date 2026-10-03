@@ -1911,6 +1911,14 @@ notify_restore_done() {
   return 0
 }
 
+notify_delete_done() {
+  local snapshot="$1"
+  [ -n "${OMARCHY_TIME_MACHINE_QUIET:-}" ] && return 0
+  notify-send -i "$(icon_for icon)" \
+    -- "Snapshot deleted" "Deleted $snapshot from $DEST_NAME" >/dev/null 2>&1
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # restore
 # ---------------------------------------------------------------------------
@@ -1979,6 +1987,41 @@ stream_restore() {
     progress_write running restore 0 "$extra"
   done
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# delete
+# ---------------------------------------------------------------------------
+
+cmd_delete() {
+  JSON_MODE=1
+  parse_options "$@"
+  demo_on && { jq -nc --arg s "$OPT_SNAPSHOT" '{ok:true, deleted:$s}'; return 0; }
+  validate_snapshot_id "$OPT_SNAPSHOT"
+
+  load_config
+  select_destination "$OPT_DEST"
+  restic_context
+  open_log
+
+  # One snapshot, gone for good. The confirmation lives in the panel; the
+  # command itself has no undo. --prune reclaims the space immediately, which
+  # can take minutes on a large repository, and is the reason this is one
+  # command: forget alone leaves the data waiting for the next backup. The
+  # output, prune report included, lands in the log; the widget reads the
+  # exit code and the JSON below.
+  log_line ""
+  log_line "Deleting snapshot $OPT_SNAPSHOT..."
+  restic_run forget --prune --retry-lock 10m -- "$OPT_SNAPSHOT" >>"$LOG_FILE" 2>&1
+  local delete_exit=$?
+
+  if [ "$delete_exit" = "0" ]; then
+    notify_delete_done "$OPT_SNAPSHOT"
+    jq -nc --arg s "$OPT_SNAPSHOT" '{ok:true, deleted:$s}'
+  else
+    jq -nc --arg e "restic forget exited $delete_exit" '{ok:false, error:$e}'
+  fi
+  return "$delete_exit"
 }
 
 # ---------------------------------------------------------------------------
@@ -2641,12 +2684,12 @@ demo_snapshots_json() {
   jq -nc --argjson now "$(date +%s)" '
     def iso($t): $t | strftime("%Y-%m-%dT%H:%M:%S+00:00");
     {ok:true, snapshots:[
-      {id:"7f21ac9e4b13d05a8f3c21d94e7b6a05c1f8d3920ab4e56718cd0f23a45b6789", short_id:"7f21ac9e", time:iso($now-11040),  paths:["/home/alex"], summary:{files_new:812}},
-      {id:"5c93de71a204f8b6c3901e4d7a2b58f0c6d1934e78ab52c0d9f3e6a1b74c8250", short_id:"5c93de71", time:iso($now-97440),  paths:["/home/alex"], summary:{files_new:1204}},
-      {id:"2b48f0ac91d635e7f80c2a1b4d97e563a0f81c294de7b350a6c9f2481be05a37", short_id:"2b48f0ac", time:iso($now-183840), paths:["/home/alex"], summary:{files_new:97}},
-      {id:"9e17b3c5d802a4f61b95e0c7d38a24f5091cb6e7a2d80f341c5b9e73a086d2f4", short_id:"9e17b3c5", time:iso($now-270240), paths:["/home/alex"], summary:{files_new:2481}},
-      {id:"438a0e6bc7f19d25a3048b1e6c90d7f2a5831be40cd97f26a1b085c34de7920f", short_id:"438a0e6b", time:iso($now-356640), paths:["/home/alex"], summary:{files_new:663}},
-      {id:"c60d92f448ae13b7f5029d8c1a4e63b70f9128d5ac36e0b41d78f2a59c03e6b18", short_id:"c60d92f4", time:iso($now-961440), paths:["/home/alex"], summary:{files_new:15302}}
+      {id:"7f21ac9e4b13d05a8f3c21d94e7b6a05c1f8d3920ab4e56718cd0f23a45b6789", short_id:"7f21ac9e", time:iso($now-11040),  paths:["/home/alex"], summary:{files_new:812, total_files_processed:1284551}},
+      {id:"5c93de71a204f8b6c3901e4d7a2b58f0c6d1934e78ab52c0d9f3e6a1b74c8250", short_id:"5c93de71", time:iso($now-97440),  paths:["/home/alex"], summary:{files_new:1204, total_files_processed:1284210}},
+      {id:"2b48f0ac91d635e7f80c2a1b4d97e563a0f81c294de7b350a6c9f2481be05a37", short_id:"2b48f0ac", time:iso($now-183840), paths:["/home/alex"], summary:{files_new:97, total_files_processed:1283990}},
+      {id:"9e17b3c5d802a4f61b95e0c7d38a24f5091cb6e7a2d80f341c5b9e73a086d2f4", short_id:"9e17b3c5", time:iso($now-270240), paths:["/home/alex"], summary:{files_new:2481, total_files_processed:1283112}},
+      {id:"438a0e6bc7f19d25a3048b1e6c90d7f2a5831be40cd97f26a1b085c34de7920f", short_id:"438a0e6b", time:iso($now-356640), paths:["/home/alex"], summary:{files_new:663, total_files_processed:1283001}},
+      {id:"c60d92f448ae13b7f5029d8c1a4e63b70f9128d5ac36e0b41d78f2a59c03e6b18", short_id:"c60d92f4", time:iso($now-961440), paths:["/home/alex"], summary:{files_new:15302, total_files_processed:1281003}}
     ]}'
 }
 
@@ -2719,6 +2762,8 @@ omarchy-time-machine $VERSION
   snapshots --dest <name> --json      list snapshots
   ls --dest <name> --snapshot <id> --path </abs> --json
   restore --dest <name> --snapshot <id> --path </abs> [--target <dir>]
+  delete --dest <name> --snapshot <id>
+                                      delete one snapshot and prune
   check --dest <name>                 verify repository integrity
   install                             (re)write and enable the systemd units
   apply-setup [--file PATH]           guided setup: JSON on stdin becomes a
@@ -2743,6 +2788,7 @@ main() {
     snapshots) need restic; cmd_snapshots "$@" ;;
     ls) need restic; cmd_ls "$@" ;;
     restore) need restic; cmd_restore "$@" ;;
+    delete) need restic; cmd_delete "$@" ;;
     check) need restic; cmd_check "$@" ;;
     install) cmd_install "$@" ;;
     report-failure) cmd_report_failure "$@" ;;

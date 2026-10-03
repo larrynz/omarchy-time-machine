@@ -659,6 +659,51 @@ Singleton {
     }
   }
 
+  // --- delete ---------------------------------------------------------------
+  //
+  // The one operation here that cannot be undone, and the picker keeps it
+  // two interactions away: pick a date, confirm, gone. The command runs
+  // forget with --prune, so the space comes back immediately and the work
+  // can take minutes on a large repository; the busy line says so rather
+  // than looking wedged.
+
+  property bool deleteBusy: false
+  property string deleteError: ""
+
+  function startDelete(d, snapshotId) {
+    if (!d || deleteBusy) return
+    deleteBusy = true
+    deleteError = ""
+    deleteProc.command = [root.cli, "delete", "--dest", String(d.name),
+                          "--snapshot", snapshotId]
+    deleteProc.running = true
+  }
+
+  Process {
+    id: deleteProc
+    stdout: StdioCollector {
+      onStreamFinished: {
+        root.deleteBusy = false
+        var payload
+        try {
+          payload = JSON.parse(text)
+        } catch (e) {
+          root.deleteError = "delete failed"
+          return
+        }
+        if (payload.ok !== true) {
+          root.deleteError = payload.error ? String(payload.error) : "delete failed"
+          return
+        }
+        // The deleted snapshot is gone from the repository, but the list was
+        // loaded earlier and the staleness key, last_success_at, does not
+        // move on a delete. Reload it now, or the date the user just deleted
+        // would sit in the picker until the next backup.
+        root.loadSnapshots()
+      }
+    }
+  }
+
   // --- formatting ---------------------------------------------------------
 
   function plain(value) {
