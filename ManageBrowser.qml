@@ -93,14 +93,23 @@ FocusScope {
   implicitHeight: column.implicitHeight
 
   // Pick the newest backup as soon as the list arrives, so the picker opens
-  // on content instead of an empty frame. Also fires after a delete: the id
-  // was cleared on confirm, and landing on the newest remaining backup is the
-  // only sensible place to start.
+  // on content instead of an empty frame. Then reconcile on every reload:
+  // the list can change underneath the picker -- a delete reloads it, and
+  // re-picking from the old list during the delete is one click away -- and
+  // an id that is no longer in the list would leave the Dropdown with a
+  // value no option matches. That renders the raw snapshot id, a
+  // 64-character hex string, in place of the date.
   Connections {
     target: TimeMachineStore
     function onSnapshotsChanged() {
-      if (root.snapshotId === "" && TimeMachineStore.snapshots.length > 0)
-        root.snapshotId = String(TimeMachineStore.snapshots[0].id)
+      var list = TimeMachineStore.snapshots
+      if (list.length === 0) {
+        root.snapshotId = ""
+        return
+      }
+      for (var i = 0; i < list.length; i++)
+        if (String(list[i].id) === root.snapshotId) return
+      root.snapshotId = String(list[0].id)
     }
   }
 

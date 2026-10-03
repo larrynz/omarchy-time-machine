@@ -280,9 +280,18 @@ FocusScope {
     function onSnapshotsChanged() {
       // Also fires after switching destination, where snapshotId was cleared:
       // landing on the newest backup of whatever you just picked is the only
-      // sensible place to start.
-      if (root.snapshotId === "" && TimeMachineStore.snapshots.length > 0)
-        root.openSnapshot(String(TimeMachineStore.snapshots[0].id))
+      // sensible place to start. And after a delete in Manage Backups, which
+      // shares this list: an id that is no longer in it would leave the
+      // picker rendering the raw snapshot id instead of a date, so one that
+      // vanished re-picks the newest remaining backup.
+      var list = TimeMachineStore.snapshots
+      if (list.length === 0) {
+        root.snapshotId = ""
+        return
+      }
+      for (var i = 0; i < list.length; i++)
+        if (String(list[i].id) === root.snapshotId) return
+      root.openSnapshot(String(list[0].id))
     }
   }
 
