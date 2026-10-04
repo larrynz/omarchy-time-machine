@@ -78,3 +78,35 @@ repository the suite already builds: delete removes a snapshot and exits 0,
 the JSON output names what was deleted, the list is shorter by one, a missing
 snapshot id and an unknown destination are refused, and demo mode makes the
 delete a no-op that still reports success.
+
+## Fixes found after implementation
+
+Three bugs surfaced in real use after the feature shipped, all picker-side:
+
+1. **A failed run's snapshots were invisible.** The store cached the
+   snapshots list keyed on `last_success_at`, which by design does not move
+   on a failed run. A failed run that still wrote a snapshot (the unreadable
+   case: restic writes a holed snapshot and exits 3) never refreshed the
+   cache, and neither of its snapshots appeared in the picker. The cache is
+   now also keyed on the run's own finish time, which moves on every run. A
+   delete moves neither key, so the delete completion still reloads the list
+   itself, as decision 7 says.
+
+2. **A delete's reload could leave a picker holding a vanished id.** The
+   reload replaces the list, but a dropdown selected on an id that is no
+   longer in it rendered the raw 64-character hex id and could not resolve a
+   summary. Both browsers now reconcile on every reload: an id no longer in
+   the list re-picks the newest remaining backup, and an empty list clears
+   the picker.
+
+3. **The unreadable count double-counted a path.** restic can report the
+   same path twice in one run (once per scan pass), and each event appended
+   a line, so one unreadable path made the notification say "and 1 more".
+   The audit file already deduplicated; the notification's count now does
+   too.
+
+A fourth fix landed on the audit rather than the picker: paths matching an
+exclude pattern count as by-design even when they are also unreadable, so a
+root-owned directory named in the exclude file does not sit in the panel's
+unreadable count forever. The README documents that under "Folders the
+backup cannot read".

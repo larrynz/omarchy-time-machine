@@ -178,7 +178,7 @@ Only `name` and `repository` are required. Everything else has a default:
 | Setting | Default | Purpose |
 |---|---|---|
 | `source` | your home folder | What gets backed up: one path, or a list like `["~", "/etc", "/srv/data"]`. If a listed path is missing, the backup fails instead of silently skipping it. Editable in the setup form. |
-| `exclude_file` | `excludes.txt` next to the config | Patterns to skip: caches, downloads, VM images. |
+| `exclude_file` | `excludes.txt` next to the config | Patterns to skip: caches, downloads, VM images, and root-owned folders the backup cannot read; see [Folders the backup cannot read](#folders-the-backup-cannot-read). |
 | `retention` | 7 daily, 4 weekly, 12 monthly, 3 yearly | Which backups are kept. Older ones are pruned. |
 | `schedule` | none | When backups run: a preset word (`daily`, `weekly`, `monthly`, `hourly`) or a systemd `OnCalendar` expression such as `Mon..Fri *-*-* 09,17:00:00`. Without a schedule, backups run only when started from the panel. |
 | `display_name` | the `name` | The label shown in the panel. |
@@ -208,15 +208,34 @@ An external drive may need to be mounted first, or a NAS may be asleep. Set `pre
 
 The command runs before every backup. It should be quick, and safe to run when the destination is already available.
 
+### Folders the backup cannot read
+
+A backup runs as you, so it can only read what you can read. Some folders you might want backed up are owned by root with mode 700, and Docker's data directory is the common case: Docker runs as root, and its storage (`/var/lib/docker`, or a custom data-root such as `/mnt/data/docker`) is intentionally private. A backup that runs as you cannot read any of it.
+
+When that happens, restic writes a snapshot with holes in it and exits with an error, and the run counts as failed on purpose. A snapshot with holes that counted as green would let the last complete backup age out of the retention schedule and be pruned, and the only trace would be a green icon while your backups quietly rot. The panel says "1 file unreadable" under the destination, restic's own error output names the paths in the destination's log, and the audit file classifies what is missing and why: `~/.local/state/omarchy-time-machine/audit-<name>.txt`.
+
+`omarchy-time-machine install` also names unreadable source directories before the first run, so you find out before the first half-failed snapshot.
+
+Most of these folders should not be in a restic backup anyway. Docker's data-root is huge, changes constantly, and its contents are only consistent at the docker level: a plain file copy of a live docker directory can be unusable for recovery. Exclude the folder instead:
+
+```bash
+printf '/mnt/data/docker\n' >> ~/.config/omarchy-time-machine/excludes.txt
+```
+
+The patterns are restic's: one per line, glob syntax, matched against the full path, so `/mnt/data/docker` covers the directory and everything under it. After the next backup the run goes green, and the backup audit counts excluded paths as by-design, so its unreadable total stays at zero even though the folder is also unreadable.
+
+If you really do want a root-owned folder backed up, give your user read access to it (a group and `setfacl` works), or run restic itself as root, outside this plugin. The plugin runs as you on purpose: running the whole thing as root moves its config, state, and panel out of your home folder and out of your reach.
+
 ## Troubleshooting
 
-The panel shows the time of the last failed backup and of the last successful one. For more detail:
+The panel shows the time of the last failed backup and of the last successful one. If it shows files unreadable under a destination, see [Folders the backup cannot read](#folders-the-backup-cannot-read). For more detail:
 
 ```bash
 omarchy-time-machine log --dest backup-drive                 # the last run's log
 systemctl --user list-timers 'omarchy-time-machine@*'  # upcoming schedules
 omarchy-time-machine backup --dest backup-drive --dry-run    # run without writing anything
 omarchy-time-machine check --dest backup-drive               # verify backup integrity
+cat ~/.local/state/omarchy-time-machine/audit-*.txt          # what the last backup could not read
 ```
 
 To list destinations and their last run times:
