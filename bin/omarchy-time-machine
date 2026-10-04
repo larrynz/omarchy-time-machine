@@ -1485,14 +1485,15 @@ audit_run() {
   # line got there first.
   (
     local snapshot snapshot_id snapshot_time src u_first
-    local src_list snap_list missing unreadable_list audit_file="$STATE_DIR/audit-$DEST_NAME.txt"
+    local src_list snap_list missing unreadable_list filtered_list audit_file="$STATE_DIR/audit-$DEST_NAME.txt"
     local n_unreadable=0 n_gone=0 n_other=0
 
     src_list="$(mktemp -- "$STATE_DIR/.audit.XXXXXX")" || exit 1
     snap_list="$(mktemp -- "$STATE_DIR/.audit.XXXXXX")" || exit 1
     missing="$(mktemp -- "$STATE_DIR/.audit.XXXXXX")" || exit 1
     unreadable_list="$(mktemp -- "$STATE_DIR/.audit.XXXXXX")" || exit 1
-    trap 'rm -f -- "$src_list" "$snap_list" "$missing" "$unreadable_list"' EXIT
+    filtered_list="$(mktemp -- "$STATE_DIR/.audit.XXXXXX")" || exit 1
+    trap 'rm -f -- "$src_list" "$snap_list" "$missing" "$unreadable_list" "$filtered_list"' EXIT
 
     # What the latest snapshot holds. No snapshot yet: nothing to compare,
     # and the audit says so rather than reporting empty counts as a bill of
@@ -1546,6 +1547,24 @@ audit_run() {
         n_unreadable=$((n_unreadable + 1))
       fi
     done < "$missing"
+    # Excluded paths are by design, even when they are also unreadable: an
+    # exclude pattern says the backup should not have them, and the unreadable
+    # total is what the panel reads as a problem. A root-owned directory named
+    # in the exclude file would otherwise sit in that count forever.
+    local audit_exclude_file excluded_by_pattern=0 upath
+    audit_exclude_file="$(expand_tilde "$(cfg '.exclude_file // empty')" 2>/dev/null)"
+    if [ -s "$unreadable_list" ] && [ -n "$audit_exclude_file" ]; then
+      while IFS= read -r upath; do
+        [ -n "$upath" ] || continue
+        if path_excluded "$upath" "$audit_exclude_file"; then
+          excluded_by_pattern=$((excluded_by_pattern + 1))
+        else
+          printf '%s\n' "$upath" >> "$filtered_list"
+        fi
+      done < "$unreadable_list"
+      mv -- "$filtered_list" "$unreadable_list"
+      n_other=$((n_other + excluded_by_pattern))
+    fi
     n_unreadable=$((n_unreadable + $(wc -l < "$unreadable_list")))
 
     {
@@ -1650,6 +1669,22 @@ stream_backup() {
 # How many files restic skipped, and the first of them. The notification has
 # to say something you can act on, and a path is that; a count on its own only
 # tells you to go and open the log.
+# Whether a path falls under an exclude pattern. The patterns are restic's:
+# one per line in the exclude file, glob syntax, matched against the full
+# path. bash's [[ == ]] covers them closely enough for the audit, which only
+# needs to keep excluded paths out of the unreadable count.
+path_excluded() {
+  local p="$1" file="$2" pattern
+  [ -n "$file" ] || return 1
+  while IFS= read -r pattern; do
+    [ -n "$pattern" ] || continue
+    case "$pattern" in "#"*) continue ;; esac
+    # shellcheck disable=SC2053  # intentional unquoted glob match
+    [[ "$p" == $pattern ]] && return 0
+  done < "$file"
+  return 1
+}
+
 unreadable_reason() {
   local count first
   readable_file "$UNREADABLE_FILE" || return 0

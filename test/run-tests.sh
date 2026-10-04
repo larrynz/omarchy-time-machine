@@ -156,6 +156,23 @@ check $? "the audit classifies the excluded file as expected-missing"
 grep -q "unreadable (the backup cannot read them): 0" "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt"
 check $? "the audit counts zero unreadable on a clean run"
 
+# An excluded path that is also unreadable is by design, not an alarm: the
+# exclude pattern says the backup should not have it, and the unreadable
+# total is what the panel reads as a problem. Without the exclude check a
+# chmod 000 directory named in the exclude file would sit in that count
+# forever.
+mkdir -p "$WORK/src/hidden" && chmod 000 "$WORK/src/hidden"
+cp "$WORK/excludes.txt" "$WORK/excludes.before-hidden"
+printf '%s\n' "$WORK/src/hidden" >> "$WORK/excludes.txt"
+$CLI backup --dest test >/dev/null 2>&1
+check $? "backup exits 0 with an excluded unreadable directory"
+grep -q "excluded by design, or created since: 2" "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt"
+check $? "the audit counts the excluded unreadable directory as by-design"
+grep -q "unreadable (the backup cannot read them): 0" "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt"
+check $? "and keeps it out of the unreadable count"
+chmod 755 "$WORK/src/hidden" && rmdir "$WORK/src/hidden"
+mv "$WORK/excludes.before-hidden" "$WORK/excludes.txt"
+
 # The verdict also lands in status.json, which is what the panel reads: the
 # widget shows the audit's quality without anyone opening the audit file.
 jq -e '.destinations.test.last_audit.unreadable == 0' "$STATUS" >/dev/null 2>&1
