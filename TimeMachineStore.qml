@@ -499,16 +499,25 @@ Singleton {
   property bool snapshotsBusy: false
   property string snapshotsError: ""
 
-  // The last success the list was loaded at. A session cache that never
-  // re-checks is how an empty listing outlives the backup that filled the
-  // repository: open the browser before the first run finishes and the empty
-  // list is held until the plugin reloads -- an hour later, after a reboot.
+  // The last success and the last run the list was loaded after. A session
+  // cache that never re-checks is how an empty listing outlives the backups
+  // that filled the repository: open the browser before the first run
+  // finishes and the empty list is held until the plugin reloads -- an hour
+  // later, after a reboot. Two keys, because the list changes on more than a
+  // success: a failed run that still wrote a snapshot (gaps) adds one while
+  // last_success_at stays put -- it means "last good backup", and the panel
+  // promises that. The run's own finish time moves on every run, success or
+  // not, so it is the key that cannot miss. A delete moves neither, but the
+  // delete reloads the list itself the moment it finishes.
   property string snapshotsLoadedAtSuccess: ""
+  property string snapshotsLoadedAtRun: ""
 
   function snapshotsStale() {
     var d = browseDest
     if (!d) return false
+    var runAt = d.last_run && d.last_run.finished_at ? String(d.last_run.finished_at) : ""
     return String(d.last_success_at || "") !== snapshotsLoadedAtSuccess
+        || runAt !== snapshotsLoadedAtRun
   }
 
   function loadSnapshots() {
@@ -518,6 +527,7 @@ Singleton {
     snapshotsBusy = true
     snapshotsError = ""
     snapshotsLoadedAtSuccess = String(d.last_success_at || "")
+    snapshotsLoadedAtRun = d.last_run && d.last_run.finished_at ? String(d.last_run.finished_at) : ""
     snapshotsProc.command = [root.cli, "snapshots", "--dest", String(d.name), "--json"]
     snapshotsProc.running = true
   }
