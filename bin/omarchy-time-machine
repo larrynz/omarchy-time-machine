@@ -1615,10 +1615,16 @@ stream_backup() {
         # One line per file restic could not read. They are the whole reason a
         # run ends in exit 3, so they are kept rather than only logged: the
         # caller counts them and names the first one in the notification.
+        # Deduplicated on write: restic can report the same path twice in one
+        # run (once per scan pass), and a doubled line would make the
+        # notification say "and 1 more" for a single path.
         message="$(jq -r '.error.message // "unknown error"' <<<"$line" 2>/dev/null)"
         item="$(jq -r '.item // ""' <<<"$line" 2>/dev/null)"
         log_line "restic: $message"
-        printf '%s\n' "${item:-$message}" >> "$unreadable_file"
+        entry="${item:-$message}"
+        if [ -n "$entry" ] && ! grep -qxF -- "$entry" "$unreadable_file" 2>/dev/null; then
+          printf '%s\n' "$entry" >> "$unreadable_file"
+        fi
         ;;
       exit_error)
         # restic closes a failed --json run with this line on stderr. It only
