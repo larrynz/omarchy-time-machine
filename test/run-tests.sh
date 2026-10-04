@@ -977,6 +977,11 @@ export PATH="$WORK/fakebin:$PATH"
 FAKE="$WORK/fake-omarchy-snapshot"
 MARK="$WORK/snapshot-ran"
 export OMARCHY_TIME_MACHINE_TEST_MARK="$MARK"
+# The copy of the snapshot into the backup reads the newest directory under
+# here as the user; the override keeps the test off the real /.snapshots,
+# which is root-only.
+export OMARCHY_SNAPSHOT_DIR="$WORK/fake-snapshots"
+export OMARCHY_TIME_MACHINE_TEST_SNAPDIR="$WORK/fake-snapshots"
 
 # A destination of its own, so the rest of the suite's state stays untouched.
 mkdir -p "$WORK/snap-repo"
@@ -988,24 +993,47 @@ check $? "the snapshot destination gets a key"
 $CLI init --dest snap >/dev/null 2>&1
 check $? "init creates the snapshot destination's repository"
 
-# created: the fake checks its own argument, drops a mark file, exits 0.
+# created: the fake checks its own argument, drops a mark file, creates the
+# snapshot directory the copy reads, and exits 0.
 cat > "$FAKE" <<'SH'
 #!/bin/bash
 [ "$1" = "create" ] || exit 9
 : > "$OMARCHY_TIME_MACHINE_TEST_MARK"
+if [ -n "${OMARCHY_TIME_MACHINE_TEST_SNAPDIR:-}" ]; then
+  mkdir -p "$OMARCHY_TIME_MACHINE_TEST_SNAPDIR/1/snapshot/docs"
+  echo frozen > "$OMARCHY_TIME_MACHINE_TEST_SNAPDIR/1/snapshot/docs/frozen.txt"
+fi
 echo "Create system snapshot"
 echo "Snapshots can be selected during boot."
 exit 0
 SH
 chmod +x "$FAKE"
 export OMARCHY_SNAPSHOT_CMD="$FAKE"
+rm -rf -- "$WORK/fake-snapshots"
 rm -f -- "$MARK"
 $CLI backup --dest snap >/dev/null 2>&1
 check $? "a backup with a green snapshot run stays green"
 [ -f "$MARK" ]
 check $? "the snapshot command ran"
+$CLI snapshots --dest snap --json | jq -e --arg p "$WORK/fake-snapshots/1/snapshot" '.snapshots[0].paths | index($p)' >/dev/null 2>&1
+check $? "the snapshot copy joins the backup as a source"
+SID="$($CLI snapshots --dest snap --json | jq -r '.snapshots[0].id')"
+$CLI ls --dest snap --snapshot "$SID" --path "$WORK/fake-snapshots/1/snapshot/docs" --json 2>/dev/null | grep -q "frozen.txt"
+check $? "the copy's files are in the backup"
 $CLI status --json | jq -e '.destinations[] | select(.name=="snap") | .last_run.system_snapshot == {result:"created", reason:null}' >/dev/null 2>&1
-check $? "a created snapshot is recorded with no reason"
+check $? "a created snapshot with a working copy is recorded with no reason"
+
+# The copy's readability: a snapshot directory that exists but reads as
+# empty (an unmounted snapshot subvolume, say) must not copy air. The
+# verdict explains it and no copy path joins the backup.
+rm -rf -- "$WORK/fake-snapshots"
+mkdir -p "$WORK/fake-snapshots/1/snapshot"
+OMARCHY_TIME_MACHINE_TEST_SNAPDIR= $CLI backup --dest snap >/dev/null 2>&1
+check $? "an unreadable snapshot copy does not fail the backup"
+$CLI status --json | jq -e '.destinations[] | select(.name=="snap") | .last_run.system_snapshot.reason != null' >/dev/null 2>&1
+check $? "a copy that cannot be read is explained in the verdict"
+$CLI snapshots --dest snap --json | jq -e --arg p "$WORK/fake-snapshots/1/snapshot" '.snapshots[0].paths | index($p) | not' >/dev/null 2>&1
+check $? "and no copy path joins the backup"
 
 # needs-sudo: sudo's own refusal, surfaced through the command's output.
 cat > "$FAKE" <<'SH'

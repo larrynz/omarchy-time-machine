@@ -579,6 +579,39 @@ system_snapshot_cmd() {
   return 1
 }
 
+# The newest system snapshot's path, for the backup that pairs with it. The
+# snapshot command prints no path of its own, so the path comes from the
+# directory snapper keeps the root config's snapshots in: SNAPSHOT_DIR inside
+# the subvolume, newest entry, and the snapshot itself. Reading it as the user
+# needs snapper's group ACL -- ALLOW_GROUPS plus SYNC_ACL in
+# /etc/snapper/configs/root -- and without it the directory is root-only, so
+# the copy is skipped rather than silently empty.
+system_snapshot_path() {
+  local subv snapdir dir newest
+  if [ -n "${OMARCHY_SNAPSHOT_DIR:-}" ]; then
+    dir="$OMARCHY_SNAPSHOT_DIR"
+  else
+    subv="$(awk -F= '$1 == "SUBVOLUME" { gsub(/"/, "", $2); print $2; exit }' /etc/snapper/configs/root 2>/dev/null)"
+    snapdir="$(awk -F= '$1 == "SNAPSHOT_DIR" { gsub(/"/, "", $2); print $2; exit }' /etc/snapper/configs/root 2>/dev/null)"
+    subv="${subv:-/}"
+    snapdir="${snapdir:-.snapshots}"
+    dir="${subv%/}/${snapdir#/}"
+  fi
+  [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || return 1
+  newest="$(ls -1t -- "$dir" 2>/dev/null | head -n 1)"
+  [ -n "$newest" ] || return 1
+  printf '%s' "$dir/$newest/snapshot"
+}
+
+# Whether a snapshot copy can actually be read: a directory with at least one
+# entry. A snapshot subvolume that is not mounted reads as an empty folder,
+# and copying air would look exactly like a copy that worked.
+system_snapshot_readable() {
+  local p="$1"
+  [ -d "$p" ] && [ -r "$p" ] && [ -x "$p" ] || return 1
+  [ -n "$(find "$p" -mindepth 1 -print -quit 2>/dev/null)" ]
+}
+
 # A system snapshot for the moment the backup runs: a bootable rollback point
 # to pair with the backup, taken with Omarchy's own omarchy-snapshot so the
 # result lands in the boot menu exactly like an update-time snapshot.
@@ -1306,13 +1339,37 @@ cmd_backup() {
   # keeps the pool small either way. One attempt, classified, never fatal.
   SYS_SNAP_RESULT=""
   SYS_SNAP_REASON=""
+  SYS_SNAP_COPY=""
+  SYS_SNAP_COPY_UNREADABLE=""
   if [ "$(dest '.system_snapshot // false')" = "true" ]; then
     if [ "$OPT_DRY_RUN" = "1" ]; then
       log_line "System snapshot: skipped (dry run)"
     else
       run_system_snapshot
+      # The copy into the backup: when the snapshot was taken, its newest
+      # path joins this run's sources, so the backup holds the system's
+      # installed state and deleting the backup removes the copy. Reading
+      # the snapshot as the user needs snapper's group ACL -- ALLOW_GROUPS
+      # plus SYNC_ACL in /etc/snapper/configs/root -- and without it the
+      # copy is skipped, with the reason saying so rather than going
+      # silently green. Files inside the snapshot that even the ACL leaves
+      # closed (root-owned 600 and 640 files, root's home) are collected
+      # here and excluded from the copy by name: the backup runs as you,
+      # and a holed snapshot counts as a failure.
+      if [ "$SYS_SNAP_RESULT" = "created" ]; then
+        SYS_SNAP_COPY="$(system_snapshot_path 2>/dev/null)" || SYS_SNAP_COPY=""
+        if [ -z "$SYS_SNAP_COPY" ] || ! system_snapshot_readable "$SYS_SNAP_COPY"; then
+          SYS_SNAP_COPY=""
+          SYS_SNAP_REASON="the snapshot was taken, but its copy into the backup could not read it; snapper's group ACL (ALLOW_GROUPS plus SYNC_ACL in /etc/snapper/configs/root) is required; see System snapshots in the README"
+        else
+          SYS_SNAP_COPY_UNREADABLE="$(find "$SYS_SNAP_COPY" \! -readable -printf '%p\n' 2>/dev/null)"
+        fi
+      fi
       log_line "System snapshot: $SYS_SNAP_RESULT"
       [ -n "$SYS_SNAP_REASON" ] && log_line "Because: $SYS_SNAP_REASON"
+      if [ -n "$SYS_SNAP_COPY" ]; then
+        log_line "Snapshot copy: $SYS_SNAP_COPY (excluding $(wc -l <<<"$SYS_SNAP_COPY_UNREADABLE") root-owned paths)"
+      fi
     fi
   fi
 
@@ -1341,6 +1398,15 @@ cmd_backup() {
   [ "$(cfg '.one_file_system // true')" = "true" ] && backup_args+=(--one-file-system)
   [ "$(cfg '.skip_if_unchanged // true')" = "true" ] && backup_args+=(--skip-if-unchanged)
   [ "$OPT_DRY_RUN" = "1" ] && backup_args+=(--dry-run)
+  # The system snapshot copy's root-owned files are excluded by name, before
+  # the paths: everything after -- is a path, and a --exclude there would be
+  # read as one.
+  while IFS= read -r p; do
+    [ -n "$p" ] && backup_args+=(--exclude "$p")
+  done <<< "$SYS_SNAP_COPY_UNREADABLE"
+  # The copy joins the run's sources: the backup holds the system's
+  # installed state, and deleting the backup removes the copy.
+  [ -n "$SYS_SNAP_COPY" ] && backup_args+=("$SYS_SNAP_COPY")
   backup_args+=(-- "${sources[@]}")
 
   progress_write running backup 1
@@ -1514,13 +1580,20 @@ audit_run() {
     # The unreadable paths are collected separately: they are the ones the
     # backup cannot have, and find cannot descend into them to list their
     # files, so the diff would never see those files at all.
-    while IFS= read -r src; do
+    {
+      cfg 'if (.source | type) == "array" then .source[] else (.source // empty) end' 2>/dev/null
+      # The system snapshot copy is a source of the run this audit belongs
+      # to, so the audit counts it the same way. On an on-demand audit no
+      # copy ran, and the copy's paths are extra snapshot content the diff
+      # never checks, so nothing about it shows up here.
+      [ -n "$SYS_SNAP_COPY" ] && printf '%s\n' "$SYS_SNAP_COPY"
+    } | while IFS= read -r src; do
       [ -n "$src" ] || continue
       src="$(expand_tilde "$src")"
       [ -e "$src" ] || continue
       find "$src" \( -type f -o -type d \) -readable -printf '%y %p\n' 2>/dev/null >> "$src_list"
       find "$src" \( -type f -o -type d \) \! -readable -printf '%p\n' 2>/dev/null >> "$unreadable_list"
-    done < <(cfg 'if (.source | type) == "array" then .source[] else (.source // empty) end' 2>/dev/null)
+    done
     restic_run ls "$snapshot_id" --json 2>/dev/null \
       | jq -r 'select(.struct_type == "node") | (if .type == "dir" then "d" else "f" end) + " " + .path' 2>/dev/null \
       >> "$snap_list" || true
@@ -1543,6 +1616,11 @@ audit_run() {
         n_gone=$((n_gone + 1))
       elif [ -r "$src" ]; then
         n_other=$((n_other + 1))
+      elif [ -n "$SYS_SNAP_COPY" ] && [ "${src#"$SYS_SNAP_COPY"/}" != "$src" ]; then
+        # Inside the system snapshot copy: root-owned files the backup runs
+        # as you cannot read are by design, the same as any other path the
+        # user cannot reach, and they are excluded from the copy by name.
+        n_other=$((n_other + 1))
       else
         n_unreadable=$((n_unreadable + 1))
       fi
@@ -1553,10 +1631,12 @@ audit_run() {
     # in the exclude file would otherwise sit in that count forever.
     local audit_exclude_file excluded_by_pattern=0 upath
     audit_exclude_file="$(expand_tilde "$(cfg '.exclude_file // empty')" 2>/dev/null)"
-    if [ -s "$unreadable_list" ] && [ -n "$audit_exclude_file" ]; then
+    if [ -s "$unreadable_list" ] && { [ -n "$audit_exclude_file" ] || [ -n "$SYS_SNAP_COPY" ]; }; then
       while IFS= read -r upath; do
         [ -n "$upath" ] || continue
         if path_excluded "$upath" "$audit_exclude_file"; then
+          excluded_by_pattern=$((excluded_by_pattern + 1))
+        elif [ -n "$SYS_SNAP_COPY" ] && [ "${upath#"$SYS_SNAP_COPY"/}" != "$upath" ]; then
           excluded_by_pattern=$((excluded_by_pattern + 1))
         else
           printf '%s\n' "$upath" >> "$filtered_list"

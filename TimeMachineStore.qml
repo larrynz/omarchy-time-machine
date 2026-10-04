@@ -308,17 +308,18 @@ Singleton {
   function destinationSnapshot(d) {
     if (!d.last_run || !d.last_run.system_snapshot) return ""
     var s = d.last_run.system_snapshot
-    if (s.result === "created") return "System snapshot: taken"
-    if (s.reason) return "System snapshot: " + s.result + " \u2014 " + s.reason
-    return "System snapshot: " + s.result
+    var word = s.result === "created" ? "taken" : s.result
+    if (s.reason) return "System snapshot: " + word + " \u2014 " + s.reason
+    return "System snapshot: " + word
   }
 
-  // Urgent when the newest run wanted a snapshot and did not get one. A
-  // "created" snapshot is the ordinary state of a working setup; anything
-  // else is a problem the reason string names.
+  // Urgent when the newest run wanted a snapshot and did not get one, or
+  // when the copy of it into the backup was skipped: a toggle that looks on
+  // must explain what did not happen, and the reason string names the fix.
   function destinationSnapshotProblem(d) {
     if (!d.last_run || !d.last_run.system_snapshot) return false
-    return d.last_run.system_snapshot.result !== "created"
+    var s = d.last_run.system_snapshot
+    return s.result !== "created" || s.reason != null
   }
 
   function startBackup() {

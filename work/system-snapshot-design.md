@@ -54,6 +54,53 @@ which runs at *login*, outside any 3AM window. Locking *what* (one fixed-argv,
 non-destructive subcommand) is the real control; the always-on residual is
 "anyone can create a snapshot", which number cleanup caps at 5 anyway.
 
+## Post-implementation addendum: the copy in the backup
+
+The original design paired a snapshot with each backup and stopped there.
+After a review of what the pairing actually protects, the scope grew one
+step: the backup also stores a copy of the snapshot it just took.
+
+The snapshot lives on the same disk as the system, so a pairing alone dies
+with the disk. The copy makes the system's installed state part of the
+backup itself, and deleting the backup deletes the copy with it, which the
+Manage Backups confirmation already spells out.
+
+The design that makes the copy possible, all covered by the suite:
+
+- **The two snapper lines** (`ALLOW_GROUPS="wheel"`, `SYNC_ACL="yes"` in
+  `/etc/snapper/configs/root`) let the backup read the newest snapshot as
+  the user. Snapper applies the ACL to snapshots created after SYNC_ACL is
+  set, so the next backup picks it up with no further steps.
+  `work/snapper-acl-wizard.sh` sets the lines up and verifies the result.
+- **The path comes from the directory, not the command**: the snapshot
+  command prints nothing, so `system_snapshot_path` reads the newest entry
+  under the snapshots dir (SNAPSHOT_DIR inside SUBVOLUME from the config,
+  default `/.snapshots`). `OMARCHY_SNAPSHOT_DIR` overrides it in tests.
+- **A copy that cannot be read is not a copy**: `system_snapshot_readable`
+  requires a non-empty readable directory, because an unmounted snapshot
+  subvolume reads as an empty folder and copying air would look exactly
+  like a copy that worked. When the read fails, the verdict says so and
+  the reason names the fix.
+- **Root-only files are excluded by name**: the files inside the snapshot
+  that even the group ACL leaves closed (shadow, host keys, /root) are
+  collected before the run and handed to restic as `--exclude` arguments
+  before the `--` separator, where everything after `--` is a path. The
+  backup runs as the user, and restic reports unreadable paths as errors,
+  so without this the copy would fail every run.
+- **The audit counts the copy as a source**: the copy path joins the
+  audit's source walk, and its root-only files classify as by-design, the
+  same as any other path the user cannot reach. On an on-demand audit no
+  copy ran and the copy's paths are extra snapshot content the diff never
+  checks, so nothing about it shows up there.
+- **The package cache rides along**: the copy brings
+  `/var/cache/pacman/pkg` into the backup, which turns over constantly;
+  the README tells the user to add it to the exclude file when the setting
+  is on.
+
+The real-box check is the wizard: it sets up the lines, creates a snapshot
+passwordless through the sudoers line, and verifies the tree is readable
+and that root-only files stay closed.
+
 ## Verdicts
 
 | Verdict | Detection |

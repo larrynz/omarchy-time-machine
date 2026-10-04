@@ -137,6 +137,24 @@ That line grants exactly one thing: running `omarchy-snapshot create` as root wi
 
 It is a real, if small, widening of what programs running as you can do: they can also create system snapshots without a password. Creating one is the least destructive thing the command does, and snapper's number cleanup keeps the pool at five snapshots, so nothing accumulates.
 
+### The copy in the backup
+
+The snapshot itself lives on the same disk as the system, so it dies with the disk. With one more setup step the backup also stores a copy of the snapshot it just took, read as your user, so the system's installed state is inside the backup itself. Snapper keeps its snapshots closed to everyone but root until two lines in its config say otherwise:
+
+```bash
+echo 'ALLOW_GROUPS="wheel"' | sudo tee -a /etc/snapper/configs/root
+echo 'SYNC_ACL="yes"' | sudo tee -a /etc/snapper/configs/root
+```
+
+Snapper applies the group ACL to snapshots created after `SYNC_ACL` is set, so the next backup picks it up with no further steps. A wizard script, `work/snapper-acl-wizard.sh` in this repository, walks through the same setup and verifies the result as your user. When the backup cannot read the snapshot, the System snapshot line says so and names the fix, and the backup still runs.
+
+Two things to know about the copy:
+
+- **Root-only files stay out.** Files inside the snapshot that even the group ACL leaves closed, such as `/etc/shadow`, the host's private keys, and `/root`, are excluded from the copy by name. The backup runs as you, and restic reports any path it cannot read as a failure, so without the exclusion the copy would fail the run; with it, the backup's audit counts those paths as by-design, the same as any other path you cannot reach.
+- **The copy is not bootable.** It is a plain file copy of the snapshot's contents, kept at restic's retention, not a rollback point. The honest description is "reinstall to the same state": after a disk loss, restore the copy and put `/usr` and `/etc` back into place over a fresh install. The bootable rollback points remain the snapshots themselves, which die with the disk.
+
+The copy also brings `/var/cache/pacman/pkg`, the package cache, into the backup, and that folder turns over constantly. When the setting is on, add it to the destination's exclude file to keep the backup small.
+
 ### What to expect
 
 - **Snapshot history is short and shared.** Snapper's default `NUMBER_LIMIT` is 5, and Omarchy's update snapshots draw from the same pool, so a nightly backup snapshot is gone from the boot menu within days. The promise is "a recent rollback point", not "the system state at every backup kept". Raise `NUMBER_LIMIT` in `/etc/snapper/configs/root` if you want the deeper kind.
@@ -184,7 +202,7 @@ Only `name` and `repository` are required. Everything else has a default:
 | `display_name` | the `name` | The label shown in the panel. |
 | `pre_command` | none | A command that runs before every backup, to mount or wake the destination. |
 | `on_failure_command` | none | A command that runs when a backup fails. |
-| `system_snapshot` | off | Also take a system snapshot with each backup, with `omarchy-snapshot`. Needs a one-time sudoers line; see [System snapshots](#system-snapshots). |
+| `system_snapshot` | off | Also take a system snapshot with each backup, with `omarchy-snapshot`, and store a copy of it in the backup. Needs a one-time sudoers line and two lines in snapper's config; see [System snapshots](#system-snapshots). |
 
 Run `omarchy-time-machine install` after changing a schedule, so the systemd units are rewritten.
 
