@@ -25,7 +25,7 @@ Singleton {
   // Written as \u escapes on purpose: a literal private-use glyph does not
   // always survive the trip from editor to disk, and the failure is silent --
   // an empty string, an invisible icon, and no error anywhere.
-  readonly property string iconTimeMachine: "\uf1da"  // clock with a rewind arrow
+  readonly property string iconBackItUp: "\uf1da"  // clock with a rewind arrow
   readonly property string iconFolder: "\uf07b"
   readonly property string iconFile: "\uf15b"
   readonly property string iconUp: "\uf148"           // level up

@@ -247,7 +247,7 @@ Panel {
       Item {
         Text {
           anchors.centerIn: parent
-          text: BackItUpStore.iconTimeMachine
+          text: BackItUpStore.iconBackItUp
           textFormat: Text.PlainText
           font.family: root.fontFamily
           font.pixelSize: Style.bar.iconFont
