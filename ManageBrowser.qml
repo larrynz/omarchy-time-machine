@@ -26,7 +26,7 @@ FocusScope {
   function confirmCancel() { deleteConfirm.opened = false }
   function confirmAccept() {
     if (root.snapshotId !== "")
-      TimeMachineStore.startDelete(TimeMachineStore.browseDest, root.snapshotId)
+      BackItUpStore.startDelete(BackItUpStore.browseDest, root.snapshotId)
     // Cleared before the outcome is known: on success the reload lands on the
     // newest remaining backup, and on failure the error line says why while
     // the dropdown waits for a fresh pick.
@@ -67,26 +67,26 @@ FocusScope {
   // empty dropdowns and nothing else.
   function ensureLoaded() {
     if (!visible) return
-    if (TimeMachineStore.destinations.length === 0) return
+    if (BackItUpStore.destinations.length === 0) return
     takeFocus()
-    if (!TimeMachineStore.snapshotsLoaded && !TimeMachineStore.snapshotsBusy)
-      TimeMachineStore.loadSnapshots()
+    if (!BackItUpStore.snapshotsLoaded && !BackItUpStore.snapshotsBusy)
+      BackItUpStore.loadSnapshots()
   }
 
   onVisibleChanged: ensureLoaded()
   Component.onCompleted: ensureLoaded()
 
   Connections {
-    target: TimeMachineStore
+    target: BackItUpStore
     function onDestinationsChanged() { root.ensureLoaded() }
   }
 
   property string snapshotId: ""
 
   function currentSnapshot() {
-    for (var i = 0; i < TimeMachineStore.snapshots.length; i++)
-      if (TimeMachineStore.snapshots[i].id === root.snapshotId)
-        return TimeMachineStore.snapshots[i]
+    for (var i = 0; i < BackItUpStore.snapshots.length; i++)
+      if (BackItUpStore.snapshots[i].id === root.snapshotId)
+        return BackItUpStore.snapshots[i]
     return null
   }
 
@@ -100,9 +100,9 @@ FocusScope {
   // value no option matches. That renders the raw snapshot id, a
   // 64-character hex string, in place of the date.
   Connections {
-    target: TimeMachineStore
+    target: BackItUpStore
     function onSnapshotsChanged() {
-      var list = TimeMachineStore.snapshots
+      var list = BackItUpStore.snapshots
       if (list.length === 0) {
         root.snapshotId = ""
         return
@@ -144,18 +144,18 @@ FocusScope {
       Dropdown {
         width: (parent.width - Style.space(46)) / 2
         anchors.verticalCenter: parent.verticalCenter
-        visible: TimeMachineStore.destinations.length > 1
+        visible: BackItUpStore.destinations.length > 1
         label: ""
         showLabel: false
         foreground: root.foreground
         fontFamily: root.fontFamily
-        value: TimeMachineStore.browseName
+        value: BackItUpStore.browseName
         options: {
           var list = []
-          for (var i = 0; i < TimeMachineStore.destinations.length; i++) {
-            var d = TimeMachineStore.destinations[i]
+          for (var i = 0; i < BackItUpStore.destinations.length; i++) {
+            var d = BackItUpStore.destinations[i]
             list.push({ value: String(d.name),
-                        label: TimeMachineStore.destinationLabel(d) })
+                        label: BackItUpStore.destinationLabel(d) })
           }
           return list
         }
@@ -164,7 +164,7 @@ FocusScope {
           // The snapshot belonged to the destination we were looking at,
           // which is not the one being switched to. Without clearing it the
           // summary would describe a backup this destination does not have.
-          TimeMachineStore.browseDestination(value)
+          BackItUpStore.browseDestination(value)
           root.takeFocus()
         }
         onPopupOpenChanged: if (!popupOpen) root.takeFocus()
@@ -174,7 +174,7 @@ FocusScope {
       // read the summary, and the delete row underneath is the only thing
       // that reaches the command.
       Dropdown {
-        width: TimeMachineStore.destinations.length > 1
+        width: BackItUpStore.destinations.length > 1
                ? (parent.width - Style.space(46)) / 2
                : parent.width - Style.space(38)
         anchors.verticalCenter: parent.verticalCenter
@@ -185,9 +185,9 @@ FocusScope {
         value: root.snapshotId
         options: {
           var list = []
-          for (var i = 0; i < TimeMachineStore.snapshots.length; i++) {
-            var s = TimeMachineStore.snapshots[i]
-            list.push({ value: String(s.id), label: TimeMachineStore.shortDate(s.time) })
+          for (var i = 0; i < BackItUpStore.snapshots.length; i++) {
+            var s = BackItUpStore.snapshots[i]
+            list.push({ value: String(s.id), label: BackItUpStore.shortDate(s.time) })
           }
           return list
         }
@@ -206,11 +206,11 @@ FocusScope {
 
     Text {
       width: parent.width
-      visible: TimeMachineStore.snapshotsBusy || TimeMachineStore.snapshotsError !== ""
-      text: TimeMachineStore.snapshotsBusy ? "Loading backups…" : TimeMachineStore.snapshotsError
+      visible: BackItUpStore.snapshotsBusy || BackItUpStore.snapshotsError !== ""
+      text: BackItUpStore.snapshotsBusy ? "Loading backups…" : BackItUpStore.snapshotsError
       textFormat: Text.PlainText
       wrapMode: Text.WordWrap
-      color: TimeMachineStore.snapshotsError !== "" ? root.urgent : root.dim
+      color: BackItUpStore.snapshotsError !== "" ? root.urgent : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
     }
@@ -260,11 +260,11 @@ FocusScope {
 
     MenuRow {
       width: parent.width
-      visible: root.snapshotId !== "" && !TimeMachineStore.deleteBusy
+      visible: root.snapshotId !== "" && !BackItUpStore.deleteBusy
       destructive: true
       label: {
         var s = root.currentSnapshot()
-        return s ? "Delete this backup (" + TimeMachineStore.shortDate(s.time) + ")" : ""
+        return s ? "Delete this backup (" + BackItUpStore.shortDate(s.time) + ")" : ""
       }
       foreground: root.foreground
       fontFamily: root.fontFamily
@@ -276,7 +276,7 @@ FocusScope {
     // and a wedged-looking panel.
     Text {
       width: parent.width
-      visible: TimeMachineStore.deleteBusy
+      visible: BackItUpStore.deleteBusy
       topPadding: visible ? Style.space(6) : 0
       bottomPadding: visible ? Style.space(6) : 0
       text: "Deleting and pruning\u2026 this can take a few minutes"
@@ -288,8 +288,8 @@ FocusScope {
 
     Text {
       width: parent.width
-      visible: TimeMachineStore.deleteError !== ""
-      text: TimeMachineStore.deleteError
+      visible: BackItUpStore.deleteError !== ""
+      text: BackItUpStore.deleteError
       textFormat: Text.PlainText
       wrapMode: Text.WrapAnywhere
       color: root.urgent
@@ -312,8 +312,8 @@ FocusScope {
     message: {
       var s = root.currentSnapshot()
       if (!s) return ""
-      return "Delete the backup from " + TimeMachineStore.shortDate(s.time)
-             + " from " + TimeMachineStore.plain(TimeMachineStore.destinationLabel(TimeMachineStore.browseDest))
+      return "Delete the backup from " + BackItUpStore.shortDate(s.time)
+             + " from " + BackItUpStore.plain(BackItUpStore.destinationLabel(BackItUpStore.browseDest))
              + "? This cannot be undone."
     }
     confirmText: "Delete"

@@ -57,8 +57,8 @@ Item {
     Text {
       anchors.verticalCenter: parent.verticalCenter
       width: Style.space(14)
-      text: root.isUp ? TimeMachineStore.iconUp
-                      : (root.isDirectory ? TimeMachineStore.iconFolder : TimeMachineStore.iconFile)
+      text: root.isUp ? BackItUpStore.iconUp
+                      : (root.isDirectory ? BackItUpStore.iconFolder : BackItUpStore.iconFile)
       textFormat: Text.PlainText
       color: root.isDirectory || root.isUp ? root.foreground : root.dim
       font.family: root.fontFamily
@@ -84,7 +84,7 @@ Item {
         if (root.isUp || root.isDirectory) return ""
         var parts = []
         if (root.entrySize !== null && root.entrySize !== undefined)
-          parts.push(TimeMachineStore.humanBytes(root.entrySize))
+          parts.push(BackItUpStore.humanBytes(root.entrySize))
         return parts.join(" ")
       }
       textFormat: Text.PlainText

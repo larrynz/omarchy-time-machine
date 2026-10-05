@@ -4,7 +4,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 
-// All Time Machine state lives here, and there is a concrete reason for that:
+// All BackIt Up state lives here, and there is a concrete reason for that:
 // a bar widget is instantiated once per monitor, so anything owning a Process
 // or a Timer in Panel.qml would exist twice on a two-monitor setup and poll
 // twice. This file is the model; Panel.qml and RestoreBrowser.qml are views.
@@ -20,7 +20,7 @@ Singleton {
   // The CLI sits next to this file, so the plugin works from wherever it was
   // installed without putting anything on $PATH.
   readonly property string cli:
-    Qt.resolvedUrl("bin/omarchy-time-machine").toString().replace(/^file:\/\//, "")
+    Qt.resolvedUrl("bin/omarchy-backitup").toString().replace(/^file:\/\//, "")
 
   // Written as \u escapes on purpose: a literal private-use glyph does not
   // always survive the trip from editor to disk, and the failure is silent --
@@ -162,7 +162,7 @@ Singleton {
 
   function startOne(name) {
     startProc.command = ["systemctl", "--user", "start", "--no-block",
-                         "omarchy-time-machine@" + name + ".service"]
+                         "omarchy-backitup@" + name + ".service"]
     startProc.running = true
   }
 
@@ -325,7 +325,7 @@ Singleton {
   function startBackup() {
     if (!active || running) return
     startProc.command = ["systemctl", "--user", "start", "--no-block",
-                         "omarchy-time-machine@" + active.name + ".service"]
+                         "omarchy-backitup@" + active.name + ".service"]
     startProc.running = true
     // Do not wait for the next tick: the unit takes a moment to report itself
     // as active, and an unresponsive button reads as a broken one.
@@ -335,7 +335,7 @@ Singleton {
   function stopBackup() {
     if (!active) return
     stopProc.command = ["systemctl", "--user", "stop",
-                        "omarchy-time-machine@" + active.name + ".service"]
+                        "omarchy-backitup@" + active.name + ".service"]
     stopProc.running = true
     kickPoll.restart()
   }
@@ -373,7 +373,7 @@ Singleton {
 
   function openConfig() {
     configProc.command = ["omarchy-launch-editor",
-                          homeDir + "/.config/omarchy-time-machine/config.json"]
+                          homeDir + "/.config/omarchy-backitup/config.json"]
     configProc.running = true
   }
 
@@ -407,7 +407,7 @@ Singleton {
   property string setupDone: ""
   property string setupPendingDoc: ""
   readonly property string applyTmpFile:
-    (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omarchy-time-machine-apply.json"
+    (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omarchy-backitup-apply.json"
 
   function applySetup(doc) {
     if (setupBusy) return
@@ -423,7 +423,7 @@ Singleton {
   Process {
     id: applyFileProc
     environment: ({ TM_DOC: setupPendingDoc })
-    command: ["bash", "-c", "umask 077; printf '%s' \"$TM_DOC\" > \"$XDG_RUNTIME_DIR/omarchy-time-machine-apply.json\""]
+    command: ["bash", "-c", "umask 077; printf '%s' \"$TM_DOC\" > \"$XDG_RUNTIME_DIR/omarchy-backitup-apply.json\""]
     onExited: function(exitCode) {
       if (exitCode !== 0) {
         root.setupBusy = false
@@ -801,7 +801,7 @@ Singleton {
   // only place the age of a backup is legible without opening the panel.
   readonly property string tooltip: {
     clockTick // re-evaluate as time passes
-    if (!configured) return "Time Machine — not configured yet"
+    if (!configured) return "BackIt Up — not configured yet"
     if (anyRunning) {
       var d = null
       for (var i = 0; i < destinations.length; i++)
@@ -814,7 +814,7 @@ Singleton {
       var since = lastSuccessAt !== "" ? ", last good one " + relativeTime(lastSuccessAt) : ""
       return "Backup failed " + when.charAt(0).toLowerCase() + when.slice(1) + since
     }
-    if (!everRan) return "Time Machine — no backup yet"
+    if (!everRan) return "BackIt Up — no backup yet"
     return "Last backup: " + relativeTime(lastRun.finished_at)
   }
 }

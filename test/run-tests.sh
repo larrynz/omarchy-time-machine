@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression suite for omarchy-time-machine.
+# Regression suite for omarchy-backitup.
 #
 # Runs entirely against a throwaway restic repository in a temporary
 # directory, with XDG_CONFIG_HOME and XDG_STATE_HOME redirected there, so it
@@ -15,12 +15,12 @@
 
 set -uo pipefail
 
-CLI="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/bin/omarchy-time-machine"
+CLI="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/bin/omarchy-backitup"
 WORK="$(mktemp -d)"
 # No desktop notifications from a test run. Without this the suite fires real
 # sticky notifications at whoever happens to be logged in, and they have to
 # dismiss each one by hand.
-export OMARCHY_TIME_MACHINE_QUIET=1
+export OMARCHY_BACKITUP_QUIET=1
 export XDG_CONFIG_HOME="$WORK/config"
 export XDG_STATE_HOME="$WORK/state"
 
@@ -60,14 +60,14 @@ fi
 
 # --- fixture ---------------------------------------------------------------
 
-mkdir -p "$XDG_CONFIG_HOME/omarchy-time-machine" "$WORK/repo" "$WORK/src/docs" "$WORK/src/pics"
+mkdir -p "$XDG_CONFIG_HOME/omarchy-backitup" "$WORK/repo" "$WORK/src/docs" "$WORK/src/pics"
 echo "hello" > "$WORK/src/docs/note.txt"
 echo "report" > "$WORK/src/docs/report.md"
 head -c 200000 /dev/urandom > "$WORK/src/pics/photo.bin"
 echo "should not be backed up" > "$WORK/src/.env"
 echo ".env" > "$WORK/excludes.txt"
 
-cat > "$XDG_CONFIG_HOME/omarchy-time-machine/config.json" <<JSON
+cat > "$XDG_CONFIG_HOME/omarchy-backitup/config.json" <<JSON
 {
   "version": 1,
   "source": "$WORK/src",
@@ -100,10 +100,10 @@ group_restic "Setup"
 printf 'test-password\n' | $CLI key set --dest test >/dev/null 2>&1
 check $? "key set"
 
-[ "$(stat -c %a "$XDG_CONFIG_HOME/omarchy-time-machine/test.key")" = "600" ]
+[ "$(stat -c %a "$XDG_CONFIG_HOME/omarchy-backitup/test.key")" = "600" ]
 check $? "the key file is 600"
 
-[ "$(stat -c %a "$XDG_CONFIG_HOME/omarchy-time-machine")" = "700" ]
+[ "$(stat -c %a "$XDG_CONFIG_HOME/omarchy-backitup")" = "700" ]
 check $? "the config directory is 700"
 
 $CLI init --dest test >/dev/null 2>&1
@@ -112,19 +112,19 @@ check $? "init creates the repository"
 # More than one entry in a destination's secrets file must be exported one at
 # a time. The defensive empty-array expansion used here previously collapsed
 # the associative array values into one invalid variable name under Bash.
-SECRETS_FILE="$XDG_CONFIG_HOME/omarchy-time-machine/test.env"
+SECRETS_FILE="$XDG_CONFIG_HOME/omarchy-backitup/test.env"
 printf 'REPO_ROOT=%s\nREPO_NAME=repo\n' "$WORK" > "$SECRETS_FILE"
-cp "$XDG_CONFIG_HOME/omarchy-time-machine/config.json" "$WORK/config.before-secrets"
+cp "$XDG_CONFIG_HOME/omarchy-backitup/config.json" "$WORK/config.before-secrets"
 jq --arg s "$SECRETS_FILE" '
   .destinations[0].repository = "${REPO_ROOT}/${REPO_NAME}"
   | .destinations[0].secrets_file = $s' \
-  "$XDG_CONFIG_HOME/omarchy-time-machine/config.json" > "$WORK/config.with-secrets"
-mv "$WORK/config.with-secrets" "$XDG_CONFIG_HOME/omarchy-time-machine/config.json"
+  "$XDG_CONFIG_HOME/omarchy-backitup/config.json" > "$WORK/config.with-secrets"
+mv "$WORK/config.with-secrets" "$XDG_CONFIG_HOME/omarchy-backitup/config.json"
 
 $CLI snapshots --dest test --json | jq -e '.ok == true' >/dev/null 2>&1
 check $? "multiple secrets-file entries are exported individually"
 
-cp "$WORK/config.before-secrets" "$XDG_CONFIG_HOME/omarchy-time-machine/config.json"
+cp "$WORK/config.before-secrets" "$XDG_CONFIG_HOME/omarchy-backitup/config.json"
 
 # --- backup ----------------------------------------------------------------
 
@@ -133,7 +133,7 @@ group_restic "Backup"
 $CLI backup --dest test >/dev/null 2>&1
 check $? "backup exits 0"
 
-STATUS="$XDG_STATE_HOME/omarchy-time-machine/status.json"
+STATUS="$XDG_STATE_HOME/omarchy-backitup/status.json"
 jq -e '.destinations.test.last_run.result == "ok"' "$STATUS" >/dev/null 2>&1
 check $? "status.json records the result"
 
@@ -149,11 +149,11 @@ check $? "the exclude file is honoured (.env stayed out)"
 # The audit runs after every backup, successful or not, and compares what is
 # on disk with what landed in the snapshot. The excluded file is missing by
 # design, so it lands in the expected bucket, not the alarm one.
-[ -f "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt" ]
+[ -f "$XDG_STATE_HOME/omarchy-backitup/audit-test.txt" ]
 check $? "an audit file is written after every backup"
-grep -q "excluded by design, or created since: 1" "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt"
+grep -q "excluded by design, or created since: 1" "$XDG_STATE_HOME/omarchy-backitup/audit-test.txt"
 check $? "the audit classifies the excluded file as expected-missing"
-grep -q "unreadable (the backup cannot read them): 0" "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt"
+grep -q "unreadable (the backup cannot read them): 0" "$XDG_STATE_HOME/omarchy-backitup/audit-test.txt"
 check $? "the audit counts zero unreadable on a clean run"
 
 # An excluded path that is also unreadable is by design, not an alarm: the
@@ -166,9 +166,9 @@ cp "$WORK/excludes.txt" "$WORK/excludes.before-hidden"
 printf '%s\n' "$WORK/src/hidden" >> "$WORK/excludes.txt"
 $CLI backup --dest test >/dev/null 2>&1
 check $? "backup exits 0 with an excluded unreadable directory"
-grep -q "excluded by design, or created since: 2" "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt"
+grep -q "excluded by design, or created since: 2" "$XDG_STATE_HOME/omarchy-backitup/audit-test.txt"
 check $? "the audit counts the excluded unreadable directory as by-design"
-grep -q "unreadable (the backup cannot read them): 0" "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt"
+grep -q "unreadable (the backup cannot read them): 0" "$XDG_STATE_HOME/omarchy-backitup/audit-test.txt"
 check $? "and keeps it out of the unreadable count"
 chmod 755 "$WORK/src/hidden" && rmdir "$WORK/src/hidden"
 mv "$WORK/excludes.before-hidden" "$WORK/excludes.txt"
@@ -188,7 +188,7 @@ check $? "status.json records the clean audit verdict for the panel"
 group_restic "Unreadable source files"
 
 GOOD_SUCCESS="$(jq -r '.destinations.test.last_success_at' "$STATUS")"
-LOGS="$XDG_STATE_HOME/omarchy-time-machine/logs/test"
+LOGS="$XDG_STATE_HOME/omarchy-backitup/logs/test"
 
 chmod 000 "$WORK/src/docs/report.md"
 $CLI backup --dest test >/dev/null 2>&1
@@ -199,9 +199,9 @@ check $? "an unreadable file fails the run, and reports it as a plain failure"
 # path -- which the diff cannot see, because an unreadable path never enters
 # the readable source listing -- and names the ACL fix with the real path.
 $CLI audit --dest test >/dev/null 2>&1
-grep -q "unreadable (the backup cannot read them): 1" "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt"
+grep -q "unreadable (the backup cannot read them): 1" "$XDG_STATE_HOME/omarchy-backitup/audit-test.txt"
 check $? "the audit counts the unreadable path after a gapped run"
-grep -q "setfacl -Rm u:" "$XDG_STATE_HOME/omarchy-time-machine/audit-test.txt"
+grep -q "setfacl -Rm u:" "$XDG_STATE_HOME/omarchy-backitup/audit-test.txt"
 check $? "the audit suggests the ACL fix with the real path"
 jq -e '.destinations.test.last_audit.unreadable == 1' "$STATUS" >/dev/null 2>&1
 check $? "status.json records the unreadable count after a gapped run"
@@ -293,14 +293,14 @@ group "Untrusted text in shell components"
 
 BROWSER="$(dirname "$CLI")/../RestoreBrowser.qml"
 
-grep -q 'TimeMachineStore\.plain(root\.restoreTargetName)' "$BROWSER"
+grep -q 'BackItUpStore\.plain(root\.restoreTargetName)' "$BROWSER"
 check $? "a filename reaches ConfirmDialog through plain()"
 
 grep -qE '\+ *root\.restoreTargetName|root\.restoreTargetName *\+' "$BROWSER"
 [ $? -ne 0 ]
 check $? "and nowhere is it concatenated into a string raw"
 
-grep -q 'replace(/\[<>\]/g' "$(dirname "$CLI")/../TimeMachineStore.qml"
+grep -q 'replace(/\[<>\]/g' "$(dirname "$CLI")/../BackItUpStore.qml"
 check $? "and plain() is what strips the characters that make Qt see markup"
 
 # --- input validation ------------------------------------------------------
@@ -332,7 +332,7 @@ check $? "and so is restoring into the home directory itself"
 
 group_restic "stdout discipline"
 
-CONFIG="$XDG_CONFIG_HOME/omarchy-time-machine/config.json"
+CONFIG="$XDG_CONFIG_HOME/omarchy-backitup/config.json"
 cp "$CONFIG" "$WORK/config.bak"
 jq '.destinations[0].pre_command = "echo noise from pre_command"' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
 
@@ -379,7 +379,7 @@ cp "$WORK/dotfiles/config.json" "$CONFIG"
 group_restic "Configuration errors"
 
 jq '.destinations[0].password_command = "echo x"
-    | .destinations[0].password_file = "'"$XDG_CONFIG_HOME"'/omarchy-time-machine/test.key"' \
+    | .destinations[0].password_file = "'"$XDG_CONFIG_HOME"'/omarchy-backitup/test.key"' \
   "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
 OUT="$($CLI backup --dest test 2>&1)"
 grep -q "pick one" <<<"$OUT"
@@ -393,7 +393,7 @@ cp "$WORK/config.bak" "$CONFIG"
 # exclusivity check instead of exercising the command.
 jq '.destinations[0].password_command = "echo test-password"
     | del(.destinations[0].password_file)' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
-rm -f "$XDG_CONFIG_HOME/omarchy-time-machine/test.key"
+rm -f "$XDG_CONFIG_HOME/omarchy-backitup/test.key"
 $CLI backup --dest test >/dev/null 2>&1
 [ "$?" = "0" ]
 check $? "a password_command feeds restic with no key file present"
@@ -407,7 +407,7 @@ printf 'test-password\n' | $CLI key set --dest test >/dev/null 2>&1
 
 jq '.exclude_file = "/nope/missing.txt"' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
 $CLI backup --dest test >/dev/null 2>&1
-[ "$(find "$XDG_STATE_HOME/omarchy-time-machine" -maxdepth 1 -name '.summary.*' | wc -l)" = "0" ]
+[ "$(find "$XDG_STATE_HOME/omarchy-backitup" -maxdepth 1 -name '.summary.*' | wc -l)" = "0" ]
 check $? "a failing run leaves no scratch files behind"
 cp "$WORK/config.bak" "$CONFIG"
 
@@ -448,7 +448,7 @@ cp "$WORK/config.bak" "$CONFIG"
 
 group_restic "Progress staleness"
 
-PROGRESS="$XDG_STATE_HOME/omarchy-time-machine/progress-test.json"
+PROGRESS="$XDG_STATE_HOME/omarchy-backitup/progress-test.json"
 jq '.state = "running" | .updated_epoch = (now - 600 | floor)' "$PROGRESS" > "$PROGRESS.n" && mv "$PROGRESS.n" "$PROGRESS"
 $CLI status --json | jq -e '.destinations[0].running == false' >/dev/null 2>&1
 check $? "a progress file older than the threshold is not treated as a running backup"
@@ -462,7 +462,7 @@ check $? "a fresh progress file is"
 group "systemd units"
 
 $CLI install >/dev/null 2>&1
-for unit in "omarchy-time-machine@.service" "omarchy-time-machine-failed@.service" "omarchy-time-machine@test.timer"; do
+for unit in "omarchy-backitup@.service" "omarchy-backitup-failed@.service" "omarchy-backitup@test.timer"; do
   [ -f "$XDG_CONFIG_HOME/systemd/user/$unit" ]
   check $? "install writes $unit"
 done
@@ -470,8 +470,8 @@ done
 # A timer starts its service through Unit=; it must not Require that service.
 # Otherwise cancelling one running backup deactivates the long-lived timer and
 # silently prevents every future scheduled backup.
-! grep -q '^Requires=omarchy-time-machine@test.service$' \
-  "$XDG_CONFIG_HOME/systemd/user/omarchy-time-machine@test.timer"
+! grep -q '^Requires=omarchy-backitup@test.service$' \
+  "$XDG_CONFIG_HOME/systemd/user/omarchy-backitup@test.timer"
 check $? "cancelling a backup cannot deactivate its timer"
 
 # restic exits 3 when it could not read a source file. The snapshot it writes
@@ -479,7 +479,7 @@ check $? "cancelling a backup cannot deactivate its timer"
 # unnoticed: the last snapshot that still held the file ages out, prune
 # reclaims its data, and the icon stayed green throughout. So the unit must
 # NOT excuse it -- OnFailure has to fire.
-grep -q "SuccessExitStatus" "$XDG_CONFIG_HOME/systemd/user/omarchy-time-machine@.service"
+grep -q "SuccessExitStatus" "$XDG_CONFIG_HOME/systemd/user/omarchy-backitup@.service"
 [ $? -ne 0 ]
 check $? "the service does not excuse restic exit 3"
 
@@ -490,7 +490,7 @@ OUT="$($CLI install 2>&1)"
 check $? "install rewrites nothing on a second run"
 
 if command -v systemd-analyze >/dev/null 2>&1; then
-  (cd "$XDG_CONFIG_HOME/systemd/user" && systemd-analyze --user verify ./omarchy-time-machine@.service >/dev/null 2>&1)
+  (cd "$XDG_CONFIG_HOME/systemd/user" && systemd-analyze --user verify ./omarchy-backitup@.service >/dev/null 2>&1)
   check $? "systemd accepts the generated service"
 fi
 
@@ -518,19 +518,19 @@ chmod 755 "$WORK/src/secret"
 # first and what is under test is whether it comes back.
 group "Unit value injection"
 
-rm -f "$XDG_CONFIG_HOME/systemd/user/omarchy-time-machine@test.timer"
+rm -f "$XDG_CONFIG_HOME/systemd/user/omarchy-backitup@test.timer"
 jq '.destinations[0].schedule = ("*-*-* 03:00:00\n\n[Service]\nExecStartPre=/tmp/evil")' \
   "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
 $CLI install >/dev/null 2>&1
 [ "$?" != "0" ]
 check $? "install refuses a schedule with unit directives in it"
-[ ! -e "$XDG_CONFIG_HOME/systemd/user/omarchy-time-machine@test.timer" ]
+[ ! -e "$XDG_CONFIG_HOME/systemd/user/omarchy-backitup@test.timer" ]
 check $? "and nothing of it reached the timer file"
 
 jq '.destinations[0].schedule = "*-*-* 03:00:00"
     | .destinations[0].randomized_delay = "15m\nNice=-20"' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
 $CLI install >/dev/null 2>&1
-[ ! -e "$XDG_CONFIG_HOME/systemd/user/omarchy-time-machine@test.timer" ]
+[ ! -e "$XDG_CONFIG_HOME/systemd/user/omarchy-backitup@test.timer" ]
 check $? "a randomized_delay with a newline is refused as well"
 
 cp "$WORK/config.bak" "$CONFIG"
@@ -560,14 +560,14 @@ check $? "status reports every destination"
 jq '.destinations[0].schedule = "*-*-* 03:00:00"
     | .destinations[1].schedule = "*-*-* 04:00:00"' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
 $CLI install >/dev/null 2>&1
-[ -f "$XDG_CONFIG_HOME/systemd/user/omarchy-time-machine@test.timer" ] \
-  && [ -f "$XDG_CONFIG_HOME/systemd/user/omarchy-time-machine@second.timer" ]
+[ -f "$XDG_CONFIG_HOME/systemd/user/omarchy-backitup@test.timer" ] \
+  && [ -f "$XDG_CONFIG_HOME/systemd/user/omarchy-backitup@second.timer" ]
 check $? "each scheduled destination gets its own timer, active or not"
 jq 'del(.destinations[].schedule)' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
 
 # Per-destination retention overrides the global block key by key, rather than
 # replacing it: `second` sets daily and weekly and inherits monthly and yearly.
-grep -qh "keep 2 daily, 1 weekly, 12 monthly, 3 yearly" "$XDG_STATE_HOME/omarchy-time-machine/logs/second/"*.log
+grep -qh "keep 2 daily, 1 weekly, 12 monthly, 3 yearly" "$XDG_STATE_HOME/omarchy-backitup/logs/second/"*.log
 check $? "per-destination retention overrides key by key, not wholesale"
 
 # A destination pointing at nothing must not take the others down with it.
@@ -831,11 +831,11 @@ grep -q "Key written to" <<<"$OUT"
 check $? "apply-setup installs the key from the document"
 grep -q "Repository created" <<<"$OUT"
 check $? "apply-setup creates the repository"
-[ "$(stat -c %a "$XDG_CONFIG_HOME/omarchy-time-machine/setup-test.key")" = "600" ]
+[ "$(stat -c %a "$XDG_CONFIG_HOME/omarchy-backitup/setup-test.key")" = "600" ]
 check $? "the key file is 600"
-[ -f "$XDG_CONFIG_HOME/systemd/user/omarchy-time-machine@setup-test.timer" ]
+[ -f "$XDG_CONFIG_HOME/systemd/user/omarchy-backitup@setup-test.timer" ]
 check $? "apply-setup writes the timer"
-jq -e '.destinations[] | select(.name == "setup-test")' "$XDG_CONFIG_HOME/omarchy-time-machine/config.json" >/dev/null
+jq -e '.destinations[] | select(.name == "setup-test")' "$XDG_CONFIG_HOME/omarchy-backitup/config.json" >/dev/null
 check $? "apply-setup merges the destination into config.json"
 
 # Applying twice corrects instead of duplicating: the repository already
@@ -843,7 +843,7 @@ check $? "apply-setup merges the destination into config.json"
 OUT="$(printf '%s' '{"name":"setup-test","repository":"'"$WORK"'/setup-repo","schedule":"daily","password":"setup-password"}' | $CLI apply-setup 2>&1)"
 grep -q "already exists" <<<"$OUT"
 check $? "a second apply keeps the repository"
-[ "$(jq '.destinations | map(select(.name == "setup-test")) | length' "$XDG_CONFIG_HOME/omarchy-time-machine/config.json")" = "1" ]
+[ "$(jq '.destinations | map(select(.name == "setup-test")) | length' "$XDG_CONFIG_HOME/omarchy-backitup/config.json")" = "1" ]
 check $? "a second apply does not duplicate the destination"
 
 # An edit through apply-setup keeps what it does not send. The setup form
@@ -851,7 +851,7 @@ check $? "a second apply does not duplicate the destination"
 # retention, pre_command and the password source must survive the merge,
 # because replacing the destination wholesale would quietly drop them, and
 # an edit that only changed the schedule would leave no password source.
-C="$XDG_CONFIG_HOME/omarchy-time-machine/config.json"
+C="$XDG_CONFIG_HOME/omarchy-backitup/config.json"
 jq '(.destinations[] | select(.name=="setup-test") | .retention) = {"daily":3,"weekly":2,"monthly":6,"yearly":1}
     | (.destinations[] | select(.name=="setup-test") | .pre_command) = "true"' "$C" > "$C.n" && mv "$C.n" "$C"
 OUT="$(printf '%s' '{"name":"setup-test","repository":"'"$WORK"'/setup-repo","schedule":"weekly","source":"'"$HOME"'"}' | $CLI apply-setup 2>&1)"
@@ -888,7 +888,7 @@ check $? "apply-setup refuses a bad calendar expression"
 OUT="$(printf '%s' '{"name":"setup-test","repository":"'"$WORK"'/setup-repo","schedule":"daily","password":"new-password","source":"'"$HOME"'"}' | $CLI apply-setup 2>&1)"
 grep -q "Key written to" <<<"$OUT"
 check $? "a new password on an edit overwrites the key file"
-grep -q '^new-password$' "$XDG_CONFIG_HOME/omarchy-time-machine/setup-test.key"
+grep -q '^new-password$' "$XDG_CONFIG_HOME/omarchy-backitup/setup-test.key"
 check $? "the key file holds the new password"
 
 # The status payload reports how each destination gets its password, so the
@@ -930,10 +930,10 @@ check $? "apply-setup refuses a destination with no password"
 
 U="$XDG_CONFIG_HOME/systemd/user"
 
-[ -f "$U/omarchy-time-machine-config.path" ]
+[ -f "$U/omarchy-backitup-config.path" ]
 check $? "apply-setup installs the config-watching path unit"
 
-[ -f "$U/omarchy-time-machine-config.service" ]
+[ -f "$U/omarchy-backitup-config.service" ]
 check $? "apply-setup installs the config-sync service"
 
 # A config edit alone changed nothing: the timer kept firing the schedule
@@ -942,7 +942,7 @@ check $? "apply-setup installs the config-sync service"
 NAME0="$(jq -r '.destinations[0].name' "$CONFIG")"
 jq '.destinations[0].schedule = "*-*-01 03:00:00"' "$CONFIG" > "$CONFIG.n" && mv "$CONFIG.n" "$CONFIG"
 $CLI install >/dev/null 2>&1 || true
-grep -q '\*-\*-01' "$U/omarchy-time-machine@$NAME0.timer"
+grep -q '\*-\*-01' "$U/omarchy-backitup@$NAME0.timer"
 check $? "install regenerates the timer from the current config"
 
 cp "$WORK/config.bak" "$CONFIG"
@@ -976,12 +976,12 @@ export PATH="$WORK/fakebin:$PATH"
 
 FAKE="$WORK/fake-omarchy-snapshot"
 MARK="$WORK/snapshot-ran"
-export OMARCHY_TIME_MACHINE_TEST_MARK="$MARK"
+export OMARCHY_BACKITUP_TEST_MARK="$MARK"
 # The copy of the snapshot into the backup reads the newest directory under
 # here as the user; the override keeps the test off the real /.snapshots,
 # which is root-only.
 export OMARCHY_SNAPSHOT_DIR="$WORK/fake-snapshots"
-export OMARCHY_TIME_MACHINE_TEST_SNAPDIR="$WORK/fake-snapshots"
+export OMARCHY_BACKITUP_TEST_SNAPDIR="$WORK/fake-snapshots"
 
 # A destination of its own, so the rest of the suite's state stays untouched.
 mkdir -p "$WORK/snap-repo"
@@ -998,10 +998,10 @@ check $? "init creates the snapshot destination's repository"
 cat > "$FAKE" <<'SH'
 #!/bin/bash
 [ "$1" = "create" ] || exit 9
-: > "$OMARCHY_TIME_MACHINE_TEST_MARK"
-if [ -n "${OMARCHY_TIME_MACHINE_TEST_SNAPDIR:-}" ]; then
-  mkdir -p "$OMARCHY_TIME_MACHINE_TEST_SNAPDIR/1/snapshot/docs"
-  echo frozen > "$OMARCHY_TIME_MACHINE_TEST_SNAPDIR/1/snapshot/docs/frozen.txt"
+: > "$OMARCHY_BACKITUP_TEST_MARK"
+if [ -n "${OMARCHY_BACKITUP_TEST_SNAPDIR:-}" ]; then
+  mkdir -p "$OMARCHY_BACKITUP_TEST_SNAPDIR/1/snapshot/docs"
+  echo frozen > "$OMARCHY_BACKITUP_TEST_SNAPDIR/1/snapshot/docs/frozen.txt"
 fi
 echo "Create system snapshot"
 echo "Snapshots can be selected during boot."
@@ -1028,7 +1028,7 @@ check $? "a created snapshot with a working copy is recorded with no reason"
 # verdict explains it and no copy path joins the backup.
 rm -rf -- "$WORK/fake-snapshots"
 mkdir -p "$WORK/fake-snapshots/1/snapshot"
-OMARCHY_TIME_MACHINE_TEST_SNAPDIR= $CLI backup --dest snap >/dev/null 2>&1
+OMARCHY_BACKITUP_TEST_SNAPDIR= $CLI backup --dest snap >/dev/null 2>&1
 check $? "an unreadable snapshot copy does not fail the backup"
 $CLI status --json | jq -e '.destinations[] | select(.name=="snap") | .last_run.system_snapshot.reason != null' >/dev/null 2>&1
 check $? "a copy that cannot be read is explained in the verdict"
@@ -1096,7 +1096,7 @@ export OMARCHY_SNAPSHOT_CMD="$FAKE"
 cat > "$FAKE" <<'SH'
 #!/bin/bash
 [ "$1" = "create" ] || exit 9
-: > "$OMARCHY_TIME_MACHINE_TEST_MARK"
+: > "$OMARCHY_BACKITUP_TEST_MARK"
 exit 0
 SH
 rm -f -- "$MARK"
@@ -1142,7 +1142,7 @@ grep -q "system_snapshot must be true or false" <<<"$OUT"
 check $? "apply-setup refuses a non-boolean system_snapshot"
 
 export PATH="$OLD_PATH"
-unset OMARCHY_SNAPSHOT_CMD OMARCHY_TIME_MACHINE_TEST_MARK
+unset OMARCHY_SNAPSHOT_CMD OMARCHY_BACKITUP_TEST_MARK
 
 # --- manage backups ---------------------------------------------------------
 

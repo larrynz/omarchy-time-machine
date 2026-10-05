@@ -5,7 +5,7 @@ import Qt.labs.folderlistmodel
 import qs.Commons
 import qs.Ui
 
-// Time Machine: scheduled restic backups, with the state of the last one a
+// BackIt Up: scheduled restic backups, with the state of the last one a
 // glance away and a snapshot browser one click further.
 //
 // The bar shows the icon and nothing else. Bar space is scarce and the age of
@@ -13,14 +13,14 @@ import qs.Ui
 // to be disturbed when something is wrong, which is what the colour is for.
 // The relative time lives in the tooltip and at the top of the panel.
 //
-// Everything with state lives in TimeMachineStore, a singleton: a bar widget
+// Everything with state lives in BackItUpStore, a singleton: a bar widget
 // is instantiated once per monitor, so timers and processes declared here
 // would run twice on a two-monitor setup.
 Panel {
   id: root
 
-  moduleName: "jankeesvw.time-machine"
-  ipcTarget: "jankeesvw.time-machine"
+  moduleName: "larrynz.backitup"
+  ipcTarget: "larrynz.backitup"
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -74,9 +74,9 @@ Panel {
   property bool setupEverOpened: false
 
   readonly property color barIconColor: {
-    if (TimeMachineStore.running) return accent
-    if (TimeMachineStore.failed) return urgent
-    if (!TimeMachineStore.configured) return Qt.darker(barForeground, 1.9)
+    if (BackItUpStore.running) return accent
+    if (BackItUpStore.failed) return urgent
+    if (!BackItUpStore.configured) return Qt.darker(barForeground, 1.9)
     return barForeground
   }
 
@@ -87,7 +87,7 @@ Panel {
   // A failed backup gets a mark, not just a colour: colour alone is the one
   // signal a bar full of coloured glyphs cannot carry, and it is invisible to
   // anyone who does not distinguish red from the foreground.
-  readonly property bool showBadge: TimeMachineStore.failed
+  readonly property bool showBadge: BackItUpStore.failed
   readonly property int badgeSize: showBadge ? Style.space(9) : 0
   readonly property int barContentWidth:
     Style.bar.iconFont + (showBadge ? badgeSize - Style.space(3) : 0)
@@ -99,9 +99,9 @@ Panel {
   implicitHeight: bar && bar.vertical ? barSlot : (bar ? bar.barSize : Style.bar.sizeHorizontal)
 
   function applySettings() {
-    TimeMachineStore.fontFamily = root.fontFamily
-    TimeMachineStore.timeFormat = String(root.setting("timeFormat", "HH:mm"))
-    TimeMachineStore.dateFormat = String(root.setting("dateFormat", "d MMM"))
+    BackItUpStore.fontFamily = root.fontFamily
+    BackItUpStore.timeFormat = String(root.setting("timeFormat", "HH:mm"))
+    BackItUpStore.dateFormat = String(root.setting("dateFormat", "d MMM"))
   }
 
   // The default calendar expression each schedule preset expands to, so the
@@ -122,8 +122,8 @@ Panel {
   // left empty on purpose: it is never shown back, and the existing password
   // source is kept unless the user types a replacement.
   function editConfig() {
-    var d = TimeMachineStore.destinations && TimeMachineStore.destinations.length > 0
-            ? TimeMachineStore.destinations[0] : null
+    var d = BackItUpStore.destinations && BackItUpStore.destinations.length > 0
+            ? BackItUpStore.destinations[0] : null
     if (!d) return
     root.editingConfig = true
     root.settingUp = true
@@ -152,8 +152,8 @@ Panel {
     // contents are a secret: the field stays empty, and the stored password
     // is kept unless the user types a replacement.
     setupPassword.text = d.password_mode === "command" ? (d.password_command || "") : ""
-    var src = TimeMachineStore.sources && TimeMachineStore.sources.length > 0
-              ? TimeMachineStore.sources.slice() : [Quickshell.env("HOME") || "/"]
+    var src = BackItUpStore.sources && BackItUpStore.sources.length > 0
+              ? BackItUpStore.sources.slice() : [Quickshell.env("HOME") || "/"]
     root.setupSources = src
     root.setupValidationError = ""
   }
@@ -177,7 +177,7 @@ Panel {
       root.settingUp = false
       return
     }
-    TimeMachineStore.refresh()
+    BackItUpStore.refresh()
   }
 
   // With the key catcher blocked, nothing else claims the keyboard: the
@@ -209,8 +209,8 @@ Panel {
       if (!root.setupEverOpened) {
         root.setupEverOpened = true
         root.setupSeeded = false
-        var src = TimeMachineStore.sources && TimeMachineStore.sources.length > 0
-                  ? TimeMachineStore.sources : []
+        var src = BackItUpStore.sources && BackItUpStore.sources.length > 0
+                  ? BackItUpStore.sources : []
         root.setupSources = src.length > 0 ? src.slice() : [Quickshell.env("HOME") || "/"]
       }
     } else if (!browsing) {
@@ -219,12 +219,12 @@ Panel {
   }
 
   Connections {
-    target: TimeMachineStore
+    target: BackItUpStore
     function onSourcesChanged() {
       if (!root.settingUp || root.setupSeeded) return
       root.setupSeeded = true
-      var src = TimeMachineStore.sources && TimeMachineStore.sources.length > 0
-                ? TimeMachineStore.sources.slice() : []
+      var src = BackItUpStore.sources && BackItUpStore.sources.length > 0
+                ? BackItUpStore.sources.slice() : []
       root.setupSources = src.length > 0 ? src : [Quickshell.env("HOME") || "/"]
     }
   }
@@ -241,13 +241,13 @@ Panel {
     // ours to set: strip anything that could be read as markup before it goes
     // in. Our own strings are safe, but a destination name comes from
     // config.json and an error message comes from restic.
-    tooltipText: TimeMachineStore.plain(TimeMachineStore.tooltip)
+    tooltipText: BackItUpStore.plain(BackItUpStore.tooltip)
 
     iconComponent: Component {
       Item {
         Text {
           anchors.centerIn: parent
-          text: TimeMachineStore.iconTimeMachine
+          text: BackItUpStore.iconTimeMachine
           textFormat: Text.PlainText
           font.family: root.fontFamily
           font.pixelSize: Style.bar.iconFont
@@ -258,13 +258,13 @@ Panel {
           // the bar: the number would demand to be read, where the pulse only
           // says "busy" and the panel carries the detail.
           SequentialAnimation on opacity {
-            running: TimeMachineStore.running
+            running: BackItUpStore.running
             loops: Animation.Infinite
             alwaysRunToEnd: true
             NumberAnimation { from: 1.0; to: 0.45; duration: 900; easing.type: Easing.InOutQuad }
             NumberAnimation { from: 0.45; to: 1.0; duration: 900; easing.type: Easing.InOutQuad }
           }
-          onVisibleChanged: if (!TimeMachineStore.running) opacity = 1.0
+          onVisibleChanged: if (!BackItUpStore.running) opacity = 1.0
         }
 
         // Exclamation badge, pinned to the glyph's top right.
@@ -294,7 +294,7 @@ Panel {
     }
 
     onPressed: function(buttonCode) {
-      if (buttonCode === Qt.RightButton) TimeMachineStore.refresh()
+      if (buttonCode === Qt.RightButton) BackItUpStore.refresh()
       else root.toggle()
     }
   }
@@ -354,7 +354,7 @@ Panel {
 
       onActivateRequested: {
         if (stopConfirm.opened) {
-          TimeMachineStore.stopBackup()
+          BackItUpStore.stopBackup()
           stopConfirm.opened = false
         } else if (root.browsing && browser.confirmOpen) {
           browser.confirmAccept()
@@ -398,15 +398,15 @@ Panel {
             width: parent.width
             bottomPadding: Style.space(8)
             text: {
-              if (TimeMachineStore.configInvalid) return "There is a problem with your configuration"
-              if (!TimeMachineStore.configured) return "No backups are set up yet"
-              if (TimeMachineStore.anyRunning) return "Backing up"
-              if (TimeMachineStore.anyFailed) return "A backup failed"
+              if (BackItUpStore.configInvalid) return "There is a problem with your configuration"
+              if (!BackItUpStore.configured) return "No backups are set up yet"
+              if (BackItUpStore.anyRunning) return "Backing up"
+              if (BackItUpStore.anyFailed) return "A backup failed"
               return "Backups"
             }
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
-            color: (TimeMachineStore.anyFailed || TimeMachineStore.configInvalid)
+            color: (BackItUpStore.anyFailed || BackItUpStore.configInvalid)
                    ? root.urgent : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -419,13 +419,13 @@ Panel {
             visible: text !== ""
             bottomPadding: visible ? Style.space(8) : 0
             text: {
-              if (TimeMachineStore.configInvalid) return TimeMachineStore.configError
-              if (!TimeMachineStore.configured) return "Set one up below and the panel walks you through it"
+              if (BackItUpStore.configInvalid) return BackItUpStore.configError
+              if (!BackItUpStore.configured) return "Set one up below and the panel walks you through it"
               return ""
             }
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
-            color: TimeMachineStore.configInvalid ? root.urgent : root.dim
+            color: BackItUpStore.configInvalid ? root.urgent : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
           }
@@ -440,7 +440,7 @@ Panel {
             bottomPadding: Style.space(8)
 
             Repeater {
-              model: TimeMachineStore.destinations
+              model: BackItUpStore.destinations
 
               Column {
                 width: parent.width
@@ -455,7 +455,7 @@ Panel {
                     anchors.right: stateText.left
                     anchors.rightMargin: Style.space(8)
                     anchors.verticalCenter: parent.verticalCenter
-                    text: TimeMachineStore.destinationLabel(modelData)
+                    text: BackItUpStore.destinationLabel(modelData)
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
                     color: root.foreground
@@ -467,9 +467,9 @@ Panel {
                     id: stateText
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    text: TimeMachineStore.destinationState(modelData)
+                    text: BackItUpStore.destinationState(modelData)
                     textFormat: Text.PlainText
-                    color: TimeMachineStore.destinationFailed(modelData) ? root.urgent : root.dim
+                    color: BackItUpStore.destinationFailed(modelData) ? root.urgent : root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                   }
@@ -484,10 +484,10 @@ Panel {
                 Text {
                   width: parent.width
                   visible: text !== ""
-                  text: TimeMachineStore.destinationAudit(modelData)
+                  text: BackItUpStore.destinationAudit(modelData)
                   textFormat: Text.PlainText
                   elide: Text.ElideRight
-                  color: TimeMachineStore.auditHasProblems(modelData) ? root.urgent : root.dimmer
+                  color: BackItUpStore.auditHasProblems(modelData) ? root.urgent : root.dimmer
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
@@ -500,10 +500,10 @@ Panel {
                 Text {
                   width: parent.width
                   visible: text !== ""
-                  text: TimeMachineStore.destinationSnapshot(modelData)
+                  text: BackItUpStore.destinationSnapshot(modelData)
                   textFormat: Text.PlainText
                   wrapMode: Text.WordWrap
-                  color: TimeMachineStore.destinationSnapshotProblem(modelData) ? root.urgent : root.dimmer
+                  color: BackItUpStore.destinationSnapshotProblem(modelData) ? root.urgent : root.dimmer
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
@@ -513,10 +513,10 @@ Panel {
                 Text {
                   width: parent.width
                   visible: text !== ""
-                  text: TimeMachineStore.destinationDetail(modelData)
+                  text: BackItUpStore.destinationDetail(modelData)
                   textFormat: Text.PlainText
                   elide: Text.ElideRight
-                  color: TimeMachineStore.destinationFailed(modelData) ? root.dim : root.dimmer
+                  color: BackItUpStore.destinationFailed(modelData) ? root.dim : root.dimmer
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
@@ -528,7 +528,7 @@ Panel {
 
           Rectangle {
             width: parent.width
-            visible: TimeMachineStore.running
+            visible: BackItUpStore.running
             height: visible ? Style.space(3) : 0
             radius: height / 2
             color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
@@ -538,7 +538,7 @@ Panel {
               radius: parent.radius
               color: root.accent
               width: {
-                var pr = TimeMachineStore.progress
+                var pr = BackItUpStore.progress
                 if (!pr || pr.percent === undefined || pr.percent === null) return 0
                 return Math.max(0, Math.min(1, Number(pr.percent))) * parent.width
               }
@@ -548,14 +548,14 @@ Panel {
 
           Text {
             width: parent.width
-            visible: TimeMachineStore.running && text !== ""
+            visible: BackItUpStore.running && text !== ""
             topPadding: visible ? Style.space(4) : 0
             bottomPadding: visible ? Style.space(4) : 0
             text: {
-              var pr = TimeMachineStore.progress
+              var pr = BackItUpStore.progress
               if (!pr || !pr.total_bytes) return ""
-              return TimeMachineStore.humanBytes(pr.bytes_done) + " of "
-                     + TimeMachineStore.humanBytes(pr.total_bytes)
+              return BackItUpStore.humanBytes(pr.bytes_done) + " of "
+                     + BackItUpStore.humanBytes(pr.total_bytes)
             }
             textFormat: Text.PlainText
             elide: Text.ElideRight
@@ -570,15 +570,15 @@ Panel {
 
           MenuRow {
             width: parent.width
-            visible: TimeMachineStore.configured && TimeMachineStore.unitsInstalled
-            label: TimeMachineStore.anyRunning ? "Stop This Backup" : "Back Up Now"
-            destructive: TimeMachineStore.anyRunning
+            visible: BackItUpStore.configured && BackItUpStore.unitsInstalled
+            label: BackItUpStore.anyRunning ? "Stop This Backup" : "Back Up Now"
+            destructive: BackItUpStore.anyRunning
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: {
-              if (TimeMachineStore.anyRunning) stopConfirm.opened = true
-              else if (TimeMachineStore.multiple) TimeMachineStore.startAllBackups()
-              else TimeMachineStore.startBackup()
+              if (BackItUpStore.anyRunning) stopConfirm.opened = true
+              else if (BackItUpStore.multiple) BackItUpStore.startAllBackups()
+              else BackItUpStore.startBackup()
             }
           }
 
@@ -586,10 +586,10 @@ Panel {
           // missing. This is the state every fresh install starts in.
           Text {
             width: parent.width
-            visible: TimeMachineStore.configured && !TimeMachineStore.unitsInstalled
+            visible: BackItUpStore.configured && !BackItUpStore.unitsInstalled
             topPadding: visible ? Style.space(6) : 0
             bottomPadding: visible ? Style.space(6) : 0
-            text: "Run \u2018omarchy-time-machine install\u2019 once to enable backups"
+            text: "Run \u2018omarchy-backitup install\u2019 once to enable backups"
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
             color: root.dim
@@ -600,32 +600,32 @@ Panel {
           PanelSeparator {
             width: parent.width
             foreground: root.foreground
-            visible: TimeMachineStore.configured
+            visible: BackItUpStore.configured
           }
 
           MenuRow {
             width: parent.width
-            visible: TimeMachineStore.configured
+            visible: BackItUpStore.configured
             label: "Restore Files\u2026"
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: {
               root.browsing = true
-              if (!TimeMachineStore.snapshotsLoaded || TimeMachineStore.snapshotsStale())
-                TimeMachineStore.loadSnapshots()
+              if (!BackItUpStore.snapshotsLoaded || BackItUpStore.snapshotsStale())
+                BackItUpStore.loadSnapshots()
             }
           }
 
           MenuRow {
             width: parent.width
-            visible: TimeMachineStore.configured
+            visible: BackItUpStore.configured
             label: "Manage Backups\u2026"
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: {
               root.managing = true
-              if (!TimeMachineStore.snapshotsLoaded || TimeMachineStore.snapshotsStale())
-                TimeMachineStore.loadSnapshots()
+              if (!BackItUpStore.snapshotsLoaded || BackItUpStore.snapshotsStale())
+                BackItUpStore.loadSnapshots()
             }
           }
 
@@ -637,7 +637,7 @@ Panel {
           // settings (retention, pre_command, the password) survive.
           MenuRow {
             width: parent.width
-            visible: TimeMachineStore.configured && TimeMachineStore.destinations.length > 0
+            visible: BackItUpStore.configured && BackItUpStore.destinations.length > 0
             label: "Edit Configuration\u2026"
             foreground: root.foreground
             fontFamily: root.fontFamily
@@ -646,18 +646,18 @@ Panel {
 
           PanelSeparator {
             width: parent.width; foreground: root.foreground
-            visible: TimeMachineStore.configured
+            visible: BackItUpStore.configured
           }
 
           MenuRow {
             width: parent.width
-            label: (TimeMachineStore.configured || TimeMachineStore.configInvalid)
+            label: (BackItUpStore.configured || BackItUpStore.configInvalid)
                    ? "Open Configuration\u2026" : "Set Up Backups\u2026"
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: {
-              if (TimeMachineStore.configured || TimeMachineStore.configInvalid) {
-                TimeMachineStore.openConfig()
+              if (BackItUpStore.configured || BackItUpStore.configInvalid) {
+                BackItUpStore.openConfig()
                 root.close()
               } else {
                 root.settingUp = true
@@ -1021,7 +1021,7 @@ Panel {
 
           MenuRow {
             width: parent.width
-            visible: TimeMachineStore.systemSnapshotAvailable
+            visible: BackItUpStore.systemSnapshotAvailable
             label: root.setupSystemSnapshot
                    ? "Also take a system snapshot \u2014 click to turn off"
                    : "Also take a system snapshot \u2014 click to turn on"
@@ -1047,10 +1047,10 @@ Panel {
 
           Text {
             width: parent.width
-            visible: TimeMachineStore.setupError !== ""
+            visible: BackItUpStore.setupError !== ""
             topPadding: visible ? Style.space(6) : 0
             bottomPadding: visible ? Style.space(6) : 0
-            text: TimeMachineStore.plain(TimeMachineStore.setupError)
+            text: BackItUpStore.plain(BackItUpStore.setupError)
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
             color: root.urgent
@@ -1060,7 +1060,7 @@ Panel {
 
           Text {
             width: parent.width
-            visible: TimeMachineStore.setupBusy
+            visible: BackItUpStore.setupBusy
             topPadding: Style.space(4)
             bottomPadding: Style.space(4)
             text: "Applying \u2014 creating the repository and switching on the schedule\u2026"
@@ -1073,9 +1073,9 @@ Panel {
 
           Text {
             width: parent.width
-            visible: !TimeMachineStore.setupBusy && TimeMachineStore.setupDone !== ""
-                     && root.setupValidationError === "" && TimeMachineStore.setupError === ""
-            text: TimeMachineStore.plain(TimeMachineStore.setupDone)
+            visible: !BackItUpStore.setupBusy && BackItUpStore.setupDone !== ""
+                     && root.setupValidationError === "" && BackItUpStore.setupError === ""
+            text: BackItUpStore.plain(BackItUpStore.setupDone)
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
             color: root.dim
@@ -1089,7 +1089,7 @@ Panel {
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: {
-              if (TimeMachineStore.setupBusy) return
+              if (BackItUpStore.setupBusy) return
               var name = setupName.text.trim()
               var repo = setupRepo.text.trim()
               if (name === "" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
@@ -1125,7 +1125,7 @@ Panel {
               } else {
                 schedule = schedText
               }
-              TimeMachineStore.applySetup({
+              BackItUpStore.applySetup({
                 name: name,
                 display_name: name,
                 repository: repo,
@@ -1277,7 +1277,7 @@ Panel {
       cancelText: "Keep running"
       fontFamily: root.fontFamily
       onConfirmed: {
-        TimeMachineStore.stopBackup()
+        BackItUpStore.stopBackup()
         stopConfirm.opened = false
       }
       onCanceled: stopConfirm.opened = false

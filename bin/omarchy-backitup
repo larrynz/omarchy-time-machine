@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 #
-# omarchy-time-machine: restic backups with a bar widget on top.
+# omarchy-backitup: restic backups with a bar widget on top.
 #
 # This is the only place that touches restic, systemd and the state files; the
 # QML widget does nothing but call this script and read JSON. That split is
@@ -9,19 +9,19 @@
 # trip or a sleeping NAS, and that only holds if the widget reads status.json
 # and nothing else.
 #
-#   omarchy-time-machine status --json         status of every destination
-#   omarchy-time-machine destinations --json   configured destinations
-#   omarchy-time-machine use <name>            pick the active destination
-#   omarchy-time-machine key set --dest N      read the repo password from stdin
-#   omarchy-time-machine key show --dest N     print it, to store it elsewhere
-#   omarchy-time-machine init --dest N         create the repository, once
-#   omarchy-time-machine backup [--dest N] [--dry-run]
-#   omarchy-time-machine snapshots --dest N --json
-#   omarchy-time-machine ls --dest N --snapshot ID --path /abs --json
-#   omarchy-time-machine restore --dest N --snapshot ID --path P [--target DIR]
-#   omarchy-time-machine check --dest N
-#   omarchy-time-machine install               write and enable the systemd units
-#   omarchy-time-machine log [--dest N]
+#   omarchy-backitup status --json         status of every destination
+#   omarchy-backitup destinations --json   configured destinations
+#   omarchy-backitup use <name>            pick the active destination
+#   omarchy-backitup key set --dest N      read the repo password from stdin
+#   omarchy-backitup key show --dest N     print it, to store it elsewhere
+#   omarchy-backitup init --dest N         create the repository, once
+#   omarchy-backitup backup [--dest N] [--dry-run]
+#   omarchy-backitup snapshots --dest N --json
+#   omarchy-backitup ls --dest N --snapshot ID --path /abs --json
+#   omarchy-backitup restore --dest N --snapshot ID --path P [--target DIR]
+#   omarchy-backitup check --dest N
+#   omarchy-backitup install               write and enable the systemd units
+#   omarchy-backitup log [--dest N]
 #
 # Dependencies: bash, jq, restic. jq ships as a hard dependency of Omarchy
 # itself, so nothing here needs installing beyond restic. Deliberately not Ruby
@@ -46,8 +46,8 @@ umask 077
 
 VERSION="1.0.0"
 
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-time-machine"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-time-machine"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-backitup"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-backitup"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 STATUS_FILE="$STATE_DIR/status.json"
 LOG_ROOT="$STATE_DIR/logs"
@@ -124,7 +124,7 @@ need() { command -v "$1" >/dev/null 2>&1 || die "$1 is not installed"; }
 # notifications onto a real desktop, which somebody then had to dismiss by
 # hand. Tests get to touch a throwaway directory, not your screen.
 notify() {
-  [ -n "${OMARCHY_TIME_MACHINE_QUIET:-}" ] && return 0
+  [ -n "${OMARCHY_BACKITUP_QUIET:-}" ] && return 0
   notify-send "$@" >/dev/null 2>&1
   return 0
 }
@@ -520,7 +520,7 @@ restic_context() {
 
   [ -n "$password_file" ] || password_file="$CONFIG_DIR/$DEST_NAME.key"
   user_file "$password_file" ||
-    die "no key file at $password_file, run: omarchy-time-machine key set --dest $DEST_NAME, or set password_command in the config if the destination fetches its own password"
+    die "no key file at $password_file, run: omarchy-backitup key set --dest $DEST_NAME, or set password_command in the config if the destination fetches its own password"
   chmod 600 -- "$password_file" 2>/dev/null
   export RESTIC_PASSWORD_FILE="$password_file"
   return 0
@@ -872,9 +872,9 @@ key_save_to_1password() {
   fi
 
   user_file "$keyfile" ||
-    die "no key file at $keyfile, run: omarchy-time-machine key set --dest $DEST_NAME"
+    die "no key file at $keyfile, run: omarchy-backitup key set --dest $DEST_NAME"
 
-  title="Time Machine backup key ($DEST_NAME)"
+  title="BackIt Up backup key ($DEST_NAME)"
   [ -n "$OPT_VAULT" ] && vault_args=(--vault "$OPT_VAULT")
 
   # Refuse rather than overwrite or duplicate. Two items with the same name is
@@ -884,7 +884,7 @@ key_save_to_1password() {
     die "1Password already has an item called \"$title\". Delete or rename it first."
   fi
 
-  notes="Repository password for the Time Machine destination \"$DEST_NAME\".
+  notes="Repository password for the BackIt Up destination \"$DEST_NAME\".
 
 Destination: $(sanitize_repository "$(dest '.repository // empty')")
 Saved from: $(hostname 2>/dev/null || printf 'unknown host')
@@ -984,7 +984,7 @@ destinations_table() {
   status="$(load_status)"
 
   units="no"
-  readable_file "$SYSTEMD_DIR/omarchy-time-machine@.service" && units="yes"
+  readable_file "$SYSTEMD_DIR/omarchy-backitup@.service" && units="yes"
 
   printf '%-14s %-22s %-38s %-14s %s\n' NAME LABEL WHERE SCHEDULE "LAST BACKUP"
   printf '%-14s %-22s %-38s %-14s %s\n' -------------- ---------------------- \
@@ -1022,7 +1022,7 @@ destinations_table() {
         | . + " GB"')"
   fi
 
-  [ "$units" = "yes" ] || printf '\nNothing is scheduled yet. Run: omarchy-time-machine install\n'
+  [ "$units" = "yes" ] || printf '\nNothing is scheduled yet. Run: omarchy-backitup install\n'
   return 0
 }
 
@@ -1090,7 +1090,7 @@ cmd_status() {
   # as a broken plugin rather than a missing step. Report it so the panel can
   # say what to do instead of offering a control that cannot work.
   installed=false
-  readable_file "$SYSTEMD_DIR/omarchy-time-machine@.service" && installed=true
+  readable_file "$SYSTEMD_DIR/omarchy-backitup@.service" && installed=true
 
   while IFS= read -r name; do
     [ -n "$name" ] || continue
@@ -1107,7 +1107,7 @@ cmd_status() {
       [ "$updated" -gt 0 ] && [ "$age" -lt "$STALE_PROGRESS_SECONDS" ] && running=true
     fi
 
-    if systemctl --user --quiet is-active "omarchy-time-machine@$name.service" 2>/dev/null; then
+    if systemctl --user --quiet is-active "omarchy-backitup@$name.service" 2>/dev/null; then
       running=true
     fi
 
@@ -1185,7 +1185,7 @@ cmd_init() {
   restic_run init || return 1
   printf '\n'
   key_warning
-  printf 'Now run: omarchy-time-machine install to switch on the schedule.\n'
+  printf 'Now run: omarchy-backitup install to switch on the schedule.\n'
 }
 
 cmd_check() {
@@ -1278,7 +1278,7 @@ cmd_backup() {
   config_dir_secure
   private_dir "$STATE_DIR" logs
   open_log
-  progress_init backup "omarchy-time-machine@$DEST_NAME.service"
+  progress_init backup "omarchy-backitup@$DEST_NAME.service"
 
   local started started_epoch backup_args exclude_file pattern entry
   local -a sources missing
@@ -1324,7 +1324,7 @@ cmd_backup() {
     die "source does not exist: ${missing[0]}"
   fi
 
-  log_line "=== Time Machine: backup to $DEST_NAME ==="
+  log_line "=== BackIt Up: backup to $DEST_NAME ==="
   log_line "Started: $(date)"
   log_line "Source:  $(printf '%s, ' "${sources[@]}" | sed 's/, $//')"
   log_line "Target:  $REPO_DISPLAY"
@@ -1979,7 +1979,7 @@ cmd_report_failure() {
   # go and find. -A implies --wait, hence the detached subshell; the timeout is
   # a backstop so a notification nobody ever touches cannot leave a process
   # sitting around for weeks.
-  if [ -z "${OMARCHY_TIME_MACHINE_QUIET:-}" ]; then
+  if [ -z "${OMARCHY_BACKITUP_QUIET:-}" ]; then
     (
       action="$(timeout 86400 notify-send -u critical -t 0 \
         -i "$(icon_for icon)" \
@@ -2022,7 +2022,7 @@ open_in_file_manager() {
 # "actions" among its capabilities).
 notify_restore_done() {
   local target="$1" selected="$2"
-  [ -n "${OMARCHY_TIME_MACHINE_QUIET:-}" ] && return 0
+  [ -n "${OMARCHY_BACKITUP_QUIET:-}" ] && return 0
   (
     action="$(timeout 3600 notify-send -i "$(icon_for icon)" \
       -A "default=Show in Files" \
@@ -2034,7 +2034,7 @@ notify_restore_done() {
 
 notify_delete_done() {
   local snapshot="$1"
-  [ -n "${OMARCHY_TIME_MACHINE_QUIET:-}" ] && return 0
+  [ -n "${OMARCHY_BACKITUP_QUIET:-}" ] && return 0
   notify-send -i "$(icon_for icon)" \
     -- "Snapshot deleted" "Deleted $snapshot from $DEST_NAME" >/dev/null 2>&1
   return 0
@@ -2173,9 +2173,9 @@ cmd_config() {
 
   printf 'Wrote a starter configuration to %s\n' "$CONFIG_FILE" >&2
   printf 'Point "repository" at your drive, then run:\n' >&2
-  printf '  omarchy-time-machine key set --dest backup-drive\n' >&2
-  printf '  omarchy-time-machine init --dest backup-drive\n' >&2
-  printf '  omarchy-time-machine install\n' >&2
+  printf '  omarchy-backitup key set --dest backup-drive\n' >&2
+  printf '  omarchy-backitup init --dest backup-drive\n' >&2
+  printf '  omarchy-backitup install\n' >&2
   printf '%s\n' "$CONFIG_FILE"
 }
 
@@ -2412,7 +2412,7 @@ cmd_apply_setup() {
 
   if [ -z "$(dest '.password_file // empty')" ] && [ -z "$(dest '.password_command // empty')" ] \
      && [ -z "$(trim "$password")" ]; then
-    die "no password for $DEST_NAME -- the setup document needs a password field, or run omarchy-time-machine key set --dest $DEST_NAME first"
+    die "no password for $DEST_NAME -- the setup document needs a password field, or run omarchy-backitup key set --dest $DEST_NAME first"
   fi
 
   restic_context
@@ -2474,11 +2474,11 @@ unit_path_env() { printf '%s' "$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"; }
 service_unit() {
   cat <<UNIT
 [Unit]
-Description=Time Machine backup to %i
-Documentation=https://github.com/jankeesvw/omarchy-time-machine
+Description=BackIt Up backup to %i
+Documentation=https://github.com/larrynz/omarchy-backitup
 After=network-online.target
 Wants=network-online.target
-OnFailure=omarchy-time-machine-failed@%i.service
+OnFailure=omarchy-backitup-failed@%i.service
 
 [Service]
 Type=oneshot
@@ -2498,7 +2498,7 @@ UNIT
 failed_unit() {
   cat <<UNIT
 [Unit]
-Description=Report a failed Time Machine backup of %i
+Description=Report a failed BackIt Up backup of %i
 
 [Service]
 Type=oneshot
@@ -2511,10 +2511,10 @@ timer_unit() {
   local name="$1" schedule="$2" delay="$3"
   cat <<UNIT
 [Unit]
-Description=Time Machine backup to $name
+Description=BackIt Up backup to $name
 
 [Timer]
-Unit=omarchy-time-machine@$name.service
+Unit=omarchy-backitup@$name.service
 OnCalendar=$schedule
 # If the machine was off at that moment, run as soon as it comes back.
 Persistent=true
@@ -2534,7 +2534,7 @@ UNIT
 config_sync_unit() {
   cat <<UNIT
 [Unit]
-Description=Regenerate Time Machine units after a config change
+Description=Regenerate BackIt Up units after a config change
 
 [Service]
 Type=oneshot
@@ -2546,7 +2546,7 @@ UNIT
 config_path_unit() {
   cat <<UNIT
 [Unit]
-Description=Watch the Time Machine config for changes
+Description=Watch the BackIt Up config for changes
 
 [Path]
 PathChanged=$CONFIG_FILE
@@ -2617,10 +2617,10 @@ cmd_install() {
   done < <(cfg '.destinations[].name')
 
   printf 'Writing units into %s:\n' "$SYSTEMD_DIR"
-  write_unit "omarchy-time-machine@.service" "$(service_unit)"
-  write_unit "omarchy-time-machine-failed@.service" "$(failed_unit)"
-  write_unit "omarchy-time-machine-config.service" "$(config_sync_unit)"
-  write_unit "omarchy-time-machine-config.path" "$(config_path_unit)"
+  write_unit "omarchy-backitup@.service" "$(service_unit)"
+  write_unit "omarchy-backitup-failed@.service" "$(failed_unit)"
+  write_unit "omarchy-backitup-config.service" "$(config_sync_unit)"
+  write_unit "omarchy-backitup-config.path" "$(config_path_unit)"
 
   local names=() name schedule delay unit path filename keep
   while IFS= read -r name; do
@@ -2630,18 +2630,18 @@ cmd_install() {
     delay="$(jq -r --arg n "$name" '.destinations[] | select(.name==$n) | .randomized_delay // "15m"' <<<"$CONFIG_JSON")"
     check_unit_values "$name" "$schedule" "$delay"
     names+=("$name")
-    write_unit "omarchy-time-machine@$name.timer" "$(timer_unit "$name" "$schedule" "$delay")"
+    write_unit "omarchy-backitup@$name.timer" "$(timer_unit "$name" "$schedule" "$delay")"
   done < <(cfg '.destinations[].name')
 
   # Timers for destinations that no longer exist, or that lost their schedule:
   # remove them, otherwise a backup keeps running for a destination nobody has
   # configured any more.
   shopt -s nullglob
-  for path in "$SYSTEMD_DIR"/omarchy-time-machine@*.timer; do
+  for path in "$SYSTEMD_DIR"/omarchy-backitup@*.timer; do
     filename="$(basename -- "$path")"
     keep=0
     for name in ${names+"${names[@]}"}; do
-      [ "$filename" = "omarchy-time-machine@$name.timer" ] && keep=1
+      [ "$filename" = "omarchy-backitup@$name.timer" ] && keep=1
     done
     [ "$keep" = "1" ] && continue
     systemctl --user disable --now "$filename" >/dev/null 2>&1
@@ -2654,10 +2654,10 @@ cmd_install() {
 
   # The path unit is what keeps the schedule in sync: enabled even when no
   # destination has a schedule, so adding one to config.json applies itself.
-  if systemctl --user enable --now "omarchy-time-machine-config.path" >/dev/null 2>&1; then
-    printf '  enabled omarchy-time-machine-config.path\n'
+  if systemctl --user enable --now "omarchy-backitup-config.path" >/dev/null 2>&1; then
+    printf '  enabled omarchy-backitup-config.path\n'
   else
-    printf '  could not enable omarchy-time-machine-config.path\n' >&2
+    printf '  could not enable omarchy-backitup-config.path\n' >&2
   fi
 
   if [ "${#names[@]}" -eq 0 ]; then
@@ -2668,7 +2668,7 @@ cmd_install() {
 
   local failures=0
   for name in "${names[@]}"; do
-    unit="omarchy-time-machine@$name.timer"
+    unit="omarchy-backitup@$name.timer"
     if systemctl --user enable --now "$unit" >/dev/null 2>&1; then
       printf '  enabled %s\n' "$unit"
     else
@@ -2678,7 +2678,7 @@ cmd_install() {
   done
 
   printf '\nNext run:\n'
-  systemctl --user list-timers 'omarchy-time-machine@*.timer' --no-pager
+  systemctl --user list-timers 'omarchy-backitup@*.timer' --no-pager
 
   # Writing the units but failing to enable them means nothing is scheduled.
   # Reporting success there would be a lie the user only discovers by noticing
@@ -2736,7 +2736,7 @@ demo_status_json() {
                  duration_seconds:64, exit_code:0, result:"ok",
                  snapshot_id:"7f21ac9e4b13d05a", files_new:812, files_changed:341,
                  data_added_bytes:486539264, total_files:1284551, error:null,
-                 log_file:"~/.local/state/omarchy-time-machine/logs/nas/latest.log",
+                 log_file:"~/.local/state/omarchy-backitup/logs/nas/latest.log",
                  system_snapshot:{result:"created", reason:null}},
        last_success_at:iso($now-11040), snapshot_count:26, repo_size_bytes:201863462912},
       {name:"usb", display_name:"Drive in my bag", schedule:null, running:false, progress:null,
@@ -2851,7 +2851,7 @@ cmd_demo() {
       mkdir -p -m 700 -- "$STATE_DIR"
       printf '%s\n' "${2:-idle}" | write_private "$DEMO_FILE"
       printf 'Demo mode is on. Every read returns invented data and every write is a no-op.\n'
-      printf 'Turn it off with: omarchy-time-machine demo off\n'
+      printf 'Turn it off with: omarchy-backitup demo off\n'
       ;;
     off)
       rm -f -- "$DEMO_FILE"
@@ -2872,7 +2872,7 @@ cmd_demo() {
 
 usage() {
   cat <<TEXT
-omarchy-time-machine $VERSION
+omarchy-backitup $VERSION
 
   status --json                       status of every destination (no network)
   destinations [--json]               list every destination and when it last ran

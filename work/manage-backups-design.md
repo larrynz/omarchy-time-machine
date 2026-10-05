@@ -25,7 +25,7 @@ so the design was agreed with the user before implementation.
    pass early. Scope stays at single-snapshot delete.
 
 3. **One CLI command, shaped like the others.**
-   `omarchy-time-machine delete --dest <name> --snapshot <id>`. The option is
+   `omarchy-backitup delete --dest <name> --snapshot <id>`. The option is
    `--snapshot`, matching restore, ls and snapshots. JSON output names what
    was deleted (`{ok:true, deleted:<id>}`); restic's own output, including
    the prune report, lands in the destination's log file, which `log` then

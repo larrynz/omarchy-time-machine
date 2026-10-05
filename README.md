@@ -1,18 +1,18 @@
-# Time Machine
+# BackIt Up
 
-Time Machine is a backup plugin for Omarchy. It uses [restic](https://restic.net) to copy your folders to a destination you choose, on a schedule you choose, and it shows one icon in your bar. The icon is green when the latest backup succeeded and red when it did not, so you never have to open anything to know whether your backups are working.
+BackIt Up is a backup plugin for Omarchy. It uses [restic](https://restic.net) to copy your folders to a destination you choose, on a schedule you choose, and it shows one icon in your bar. The icon is green when the latest backup succeeded and red when it did not, so you never have to open anything to know whether your backups are working.
 
 Backups are kept according to a retention schedule: by default 7 daily, 4 weekly, 12 monthly, and 3 yearly snapshots, with older ones pruned automatically. Files can be restored from a backup, and a backup can be deleted by hand from the panel, one at a time. Each backup can also take a system snapshot: a bootable rollback point that appears in the boot menu, taken at the moment the backup runs. It is optional, and needs a one-time sudoers line; see [System snapshots](#system-snapshots).
 
-![Time Machine](screenshots/panel.png)
+![BackIt Up](screenshots/panel.png)
 
 ## Install
 
 ```bash
 sudo pacman -S restic
-omarchy plugin add https://github.com/jankeesvw/omarchy-time-machine
-omarchy plugin enable jankeesvw.time-machine
-omarchy bar move jankeesvw.time-machine --section right
+omarchy plugin add https://github.com/larrynz/omarchy-backitup
+omarchy plugin enable larrynz.backitup
+omarchy bar move larrynz.backitup --section right
 ```
 
 restic is the only dependency.
@@ -22,13 +22,13 @@ restic is the only dependency.
 Some tasks are easier from a terminal. The plugin's command is not installed on your `PATH`; it lives inside the plugin directory:
 
 ```bash
-~/.config/omarchy/plugins/jankeesvw.time-machine/bin/omarchy-time-machine
+~/.config/omarchy/plugins/larrynz.backitup/bin/omarchy-backitup
 ```
 
-Every `omarchy-time-machine ...` example below refers to that path. To type it comfortably, add an alias to your `~/.bashrc`:
+Every `omarchy-backitup ...` example below refers to that path. To type it comfortably, add an alias to your `~/.bashrc`:
 
 ```bash
-alias omarchy-time-machine=~/.config/omarchy/plugins/jankeesvw.time-machine/bin/omarchy-time-machine
+alias omarchy-backitup=~/.config/omarchy/plugins/larrynz.backitup/bin/omarchy-backitup
 ```
 
 ## Setting up backups
@@ -68,13 +68,13 @@ Backups are encrypted. If a disk is stolen or a storage account is compromised, 
 
 The password field supports two storage modes, and clicking the row under the field switches between them:
 
-- **Stored in a key file.** The text you type is the password itself. It is written to `~/.config/omarchy-time-machine/<name>.key` with mode 600. It is never written to the config file, and it never appears in a process list.
+- **Stored in a key file.** The text you type is the password itself. It is written to `~/.config/omarchy-backitup/<name>.key` with mode 600. It is never written to the config file, and it never appears in a process list.
 - **Fetched with a command.** The text you type is a command that prints the password, stored as `password_command` in the config. Examples: `pass show omarchy/backup-drive`, `op read <secret>`, `bw get <item>`. The command runs on this machine whenever a backup runs, so the password manager's CLI must be installed and unlocked here. Scheduled runs have no terminal to prompt in, so the command must answer without asking: keep the agent's passphrase cached or configure loopback pinentry.
 
 Setting both a password and a password command is refused. In the config, only one of these may be set:
 
 ```json
-{ "name": "backup-drive", "password_file": "~/.config/omarchy-time-machine/backup-drive.key" }
+{ "name": "backup-drive", "password_file": "~/.config/omarchy-backitup/backup-drive.key" }
 { "name": "backup-drive", "password_command": "pass show omarchy/backup-drive" }
 ```
 
@@ -85,7 +85,7 @@ The password encrypts backup contents only. Storage credentials such as S3 acces
 The password is stored in your home folder, and your home folder is a backup source. If the machine is lost, the stored password is lost with it, and nobody can open the backups. Make a second copy now:
 
 ```bash
-omarchy-time-machine key show --dest backup-drive
+omarchy-backitup key show --dest backup-drive
 ```
 
 Save the output in your password manager, or print it and store it somewhere physical.
@@ -93,22 +93,22 @@ Save the output in your password manager, or print it and store it somewhere phy
 With 1Password:
 
 ```bash
-omarchy-time-machine key save-1password --dest backup-drive
+omarchy-backitup key save-1password --dest backup-drive
 ```
 
-This creates a vault item named "Time Machine backup key (backup-drive)". It refuses to overwrite an item that already exists under that name.
+This creates a vault item named "BackIt Up backup key (backup-drive)". It refuses to overwrite an item that already exists under that name.
 
 With `pass`:
 
 ```bash
-omarchy-time-machine key show --dest backup-drive | pass insert -m omarchy/backup-drive
+omarchy-backitup key show --dest backup-drive | pass insert -m omarchy/backup-drive
 ```
 
 ## System snapshots
 
 Omarchy keeps its own system snapshots with snapper, and they can be selected during boot. This plugin can take one with every backup, so each restic backup is paired with a bootable "the system as it backed itself up" rollback point, taken with Omarchy's own command `omarchy-snapshot create` just before the backup starts.
 
-Turn it on in the setup form with **Also take a system snapshot**. It is off by default, and the row is offered only on machines that have `omarchy-snapshot`, which is every Omarchy install. The setting lives in the config file as `system_snapshot` on each destination, so it can also be changed by hand through **Open Configuration…**. Unlike a schedule change it needs no `omarchy-time-machine install` run afterwards: the backup reads the config when it starts.
+Turn it on in the setup form with **Also take a system snapshot**. It is off by default, and the row is offered only on machines that have `omarchy-snapshot`, which is every Omarchy install. The setting lives in the config file as `system_snapshot` on each destination, so it can also be changed by hand through **Open Configuration…**. Unlike a schedule change it needs no `omarchy-backitup install` run afterwards: the backup reads the config when it starts.
 
 One attempt per backup, a two-minute timeout, and the outcome is reported in the panel under the destination:
 
@@ -124,7 +124,7 @@ A snapshot problem never fails the backup. The two are paired, but the backup is
 A scheduled run happens in a systemd user service, which has no terminal. Give the command passwordless sudo with one exact line:
 
 ```bash
-sudo visudo -f /etc/sudoers.d/omarchy-time-machine-snapshot
+sudo visudo -f /etc/sudoers.d/omarchy-backitup-snapshot
 ```
 
 with this content, replacing `youruser` with your username:
@@ -163,7 +163,7 @@ The copy also brings `/var/cache/pacman/pkg`, the package cache, into the backup
 
 ## Extra credentials
 
-Destinations such as S3 or REST servers need more than the backup password. Each destination can have an env file at `~/.config/omarchy-time-machine/<name>.env`, or at the path configured in `secrets_file`, holding `KEY=VALUE` lines. A `${NAME}` in the repository URL is replaced with the value of `NAME` from that file:
+Destinations such as S3 or REST servers need more than the backup password. Each destination can have an env file at `~/.config/omarchy-backitup/<name>.env`, or at the path configured in `secrets_file`, holding `KEY=VALUE` lines. A `${NAME}` in the repository URL is replaced with the value of `NAME` from that file:
 
 ```json
 { "name": "offsite", "repository": "s3:s3.amazonaws.com/${bucket}" }
@@ -204,14 +204,14 @@ Only `name` and `repository` are required. Everything else has a default:
 | `on_failure_command` | none | A command that runs when a backup fails. |
 | `system_snapshot` | off | Also take a system snapshot with each backup, with `omarchy-snapshot`, and store a copy of it in the backup. Needs a one-time sudoers line and two lines in snapper's config; see [System snapshots](#system-snapshots). |
 
-Run `omarchy-time-machine install` after changing a schedule, so the systemd units are rewritten.
+Run `omarchy-backitup install` after changing a schedule, so the systemd units are rewritten.
 
 Also run it once after updating from a version older than 1.1.0. Timers written before 1.1.0 carried a `Requires=` dependency on the backup service: stopping a running backup also stopped its timer, so no further backups were scheduled. Running `install` rewrites and re-enables the units.
 
 Times use a 24-hour clock. For AM/PM, set `timeFormat` on the widget in `shell.json`:
 
 ```json
-{ "id": "jankeesvw.time-machine", "timeFormat": "h:mm AP" }
+{ "id": "larrynz.backitup", "timeFormat": "h:mm AP" }
 ```
 
 ### Destinations that are not always available
@@ -230,14 +230,14 @@ The command runs before every backup. It should be quick, and safe to run when t
 
 A backup runs as you, so it can only read what you can read. Some folders you might want backed up are owned by root with mode 700, and Docker's data directory is the common case: Docker runs as root, and its storage (`/var/lib/docker`, or a custom data-root such as `/mnt/data/docker`) is intentionally private. A backup that runs as you cannot read any of it.
 
-When that happens, restic writes a snapshot with holes in it and exits with an error, and the run counts as failed on purpose. A snapshot with holes that counted as green would let the last complete backup age out of the retention schedule and be pruned, and the only trace would be a green icon while your backups quietly rot. The panel says "1 file unreadable" under the destination, restic's own error output names the paths in the destination's log, and the audit file classifies what is missing and why: `~/.local/state/omarchy-time-machine/audit-<name>.txt`.
+When that happens, restic writes a snapshot with holes in it and exits with an error, and the run counts as failed on purpose. A snapshot with holes that counted as green would let the last complete backup age out of the retention schedule and be pruned, and the only trace would be a green icon while your backups quietly rot. The panel says "1 file unreadable" under the destination, restic's own error output names the paths in the destination's log, and the audit file classifies what is missing and why: `~/.local/state/omarchy-backitup/audit-<name>.txt`.
 
-`omarchy-time-machine install` also names unreadable source directories before the first run, so you find out before the first half-failed snapshot.
+`omarchy-backitup install` also names unreadable source directories before the first run, so you find out before the first half-failed snapshot.
 
 Most of these folders should not be in a restic backup anyway. Docker's data-root is huge, changes constantly, and its contents are only consistent at the docker level: a plain file copy of a live docker directory can be unusable for recovery. Exclude the folder instead:
 
 ```bash
-printf '/mnt/data/docker\n' >> ~/.config/omarchy-time-machine/excludes.txt
+printf '/mnt/data/docker\n' >> ~/.config/omarchy-backitup/excludes.txt
 ```
 
 The patterns are restic's: one per line, glob syntax, matched against the full path, so `/mnt/data/docker` covers the directory and everything under it. After the next backup the run goes green, and the backup audit counts excluded paths as by-design, so its unreadable total stays at zero even though the folder is also unreadable.
@@ -249,17 +249,17 @@ If you really do want a root-owned folder backed up, give your user read access 
 The panel shows the time of the last failed backup and of the last successful one. If it shows files unreadable under a destination, see [Folders the backup cannot read](#folders-the-backup-cannot-read). For more detail:
 
 ```bash
-omarchy-time-machine log --dest backup-drive                 # the last run's log
-systemctl --user list-timers 'omarchy-time-machine@*'  # upcoming schedules
-omarchy-time-machine backup --dest backup-drive --dry-run    # run without writing anything
-omarchy-time-machine check --dest backup-drive               # verify backup integrity
-cat ~/.local/state/omarchy-time-machine/audit-*.txt          # what the last backup could not read
+omarchy-backitup log --dest backup-drive                 # the last run's log
+systemctl --user list-timers 'omarchy-backitup@*'  # upcoming schedules
+omarchy-backitup backup --dest backup-drive --dry-run    # run without writing anything
+omarchy-backitup check --dest backup-drive               # verify backup integrity
+cat ~/.local/state/omarchy-backitup/audit-*.txt          # what the last backup could not read
 ```
 
 To list destinations and their last run times:
 
 ```
-$ omarchy-time-machine destinations
+$ omarchy-backitup destinations
 NAME           LABEL                  WHERE                                  SCHEDULE       LAST BACKUP
 nas            Office NAS             sftp:me@nas:/volume1/backup            *-*-* 03:00:00 2026-08-25 03:07
 usb            USB drive              /run/media/me/backup/restic            on request     2026-08-18 06:50
@@ -270,28 +270,28 @@ offsite        Offsite                s3:s3.eu-central-1.amazonaws.com/attic *-*
 
 This reads only the config and one local state file, so it answers immediately whether or not the destination is connected.
 
-Run `omarchy-time-machine` with no arguments to list all commands.
+Run `omarchy-backitup` with no arguments to list all commands.
 
 ## Uninstalling
 
 Removing the plugin leaves your backups, configuration, and schedule in place:
 
 ```bash
-omarchy plugin remove jankeesvw.time-machine
+omarchy plugin remove larrynz.backitup
 ```
 
 To remove the schedule and the stored settings as well:
 
 ```bash
-systemctl --user disable --now 'omarchy-time-machine@*.timer'
-rm -f ~/.config/systemd/user/omarchy-time-machine*
+systemctl --user disable --now 'omarchy-backitup@*.timer'
+rm -f ~/.config/systemd/user/omarchy-backitup*
 systemctl --user daemon-reload
 
-rm -rf ~/.config/omarchy-time-machine        # config and backup passwords
-rm -rf ~/.local/state/omarchy-time-machine   # run history and logs
+rm -rf ~/.config/omarchy-backitup        # config and backup passwords
+rm -rf ~/.local/state/omarchy-backitup   # run history and logs
 ```
 
-`~/.config/omarchy-time-machine` holds the backup passwords. Deleting it without another copy makes the backups permanently unreadable. `~/.local/state/omarchy-time-machine` holds run history and thirty days of logs, including the names of files that could not be read.
+`~/.config/omarchy-backitup` holds the backup passwords. Deleting it without another copy makes the backups permanently unreadable. `~/.local/state/omarchy-backitup` holds run history and thirty days of logs, including the names of files that could not be read.
 
 The backups themselves are never removed by any of these commands. Anyone with the password can still open them.
 

@@ -33,7 +33,7 @@ FocusScope {
   function confirmCancel() { restoreConfirm.opened = false }
   function confirmAccept() {
     if (root.restoreTargetPath !== "")
-      TimeMachineStore.restore(root.snapshotId, root.restoreTargetPath)
+      BackItUpStore.restore(root.snapshotId, root.restoreTargetPath)
     restoreConfirm.opened = false
   }
 
@@ -96,10 +96,10 @@ FocusScope {
   // empty dropdowns and nothing else.
   function ensureLoaded() {
     if (!visible) return
-    if (TimeMachineStore.destinations.length === 0) return
+    if (BackItUpStore.destinations.length === 0) return
     takeFocus()
-    if (!TimeMachineStore.snapshotsLoaded && !TimeMachineStore.snapshotsBusy)
-      TimeMachineStore.loadSnapshots()
+    if (!BackItUpStore.snapshotsLoaded && !BackItUpStore.snapshotsBusy)
+      BackItUpStore.loadSnapshots()
   }
 
   // Three triggers, and each one covers a case the others miss.
@@ -114,7 +114,7 @@ FocusScope {
   Component.onCompleted: ensureLoaded()
 
   Connections {
-    target: TimeMachineStore
+    target: BackItUpStore
     function onDestinationsChanged() { root.ensureLoaded() }
   }
 
@@ -122,7 +122,7 @@ FocusScope {
   property string restoreTargetName: ""
 
   readonly property string currentFolderName: {
-    var path = TimeMachineStore.currentPath
+    var path = BackItUpStore.currentPath
     if (path === "" || path === "/") return "/"
     return path.substring(path.lastIndexOf("/") + 1)
   }
@@ -140,9 +140,9 @@ FocusScope {
   // The snapshot's own paths are the only sensible starting point: they are
   // what was backed up, so anything above them is empty in this snapshot.
   function currentSnapshot() {
-    for (var i = 0; i < TimeMachineStore.snapshots.length; i++)
-      if (TimeMachineStore.snapshots[i].id === root.snapshotId)
-        return TimeMachineStore.snapshots[i]
+    for (var i = 0; i < BackItUpStore.snapshots.length; i++)
+      if (BackItUpStore.snapshots[i].id === root.snapshotId)
+        return BackItUpStore.snapshots[i]
     return null
   }
 
@@ -162,7 +162,7 @@ FocusScope {
     root.selected = null
     root.cursorIndex = 0
     clearFilter()
-    TimeMachineStore.listPath(root.snapshotId, root.rootPath)
+    BackItUpStore.listPath(root.snapshotId, root.rootPath)
   }
 
   function clearFilter() { root.filter = ""; root.cursorIndex = 0 }
@@ -190,7 +190,7 @@ FocusScope {
   // can we without a second call on the parent. So we stay there and say the
   // folder is empty in this snapshot; ".." is one keystroke away.
   function openSnapshot(id) {
-    var previous = TimeMachineStore.currentPath
+    var previous = BackItUpStore.currentPath
     var previousRoot = root.rootPath
     root.snapshotId = id
     root.selected = null
@@ -205,26 +205,26 @@ FocusScope {
 
     var target = root.rootPath
     if (previous !== "" && isAtOrBelowRoot(previous, root.rootPath)) target = previous
-    TimeMachineStore.listPath(id, target)
+    BackItUpStore.listPath(id, target)
   }
 
   function enterDirectory(path) {
     root.selected = null
     root.cursorIndex = 0
     clearFilter()
-    TimeMachineStore.listPath(root.snapshotId, path)
+    BackItUpStore.listPath(root.snapshotId, path)
   }
 
   function goUp() {
-    var path = TimeMachineStore.currentPath
+    var path = BackItUpStore.currentPath
     if (path === root.rootPath || path === "/") return
     var parent = path.substring(0, path.lastIndexOf("/"))
     if (parent === "") parent = "/"
     enterDirectory(parent)
   }
 
-  readonly property bool atRoot: TimeMachineStore.currentPath === root.rootPath
-                                 || TimeMachineStore.currentPath === ""
+  readonly property bool atRoot: BackItUpStore.currentPath === root.rootPath
+                                 || BackItUpStore.currentPath === ""
 
   // Filtering happens on the loaded page only, and the label says so: with a
   // truncated listing an empty result would otherwise read as "this folder has
@@ -264,7 +264,7 @@ FocusScope {
   onRowsChanged: if (cursorIndex > rows.length - 1) cursorIndex = Math.max(0, rows.length - 1)
 
   readonly property var visibleEntries: {
-    var all = TimeMachineStore.entries || []
+    var all = BackItUpStore.entries || []
     if (root.filter === "") return all
     var needle = root.filter.toLowerCase()
     var out = []
@@ -276,7 +276,7 @@ FocusScope {
   // Pick the first snapshot as soon as the list arrives, so the browser opens
   // on content instead of an empty frame.
   Connections {
-    target: TimeMachineStore
+    target: BackItUpStore
     function onSnapshotsChanged() {
       // Also fires after switching destination, where snapshotId was cleared:
       // landing on the newest backup of whatever you just picked is the only
@@ -284,7 +284,7 @@ FocusScope {
       // shares this list: an id that is no longer in it would leave the
       // picker rendering the raw snapshot id instead of a date, so one that
       // vanished re-picks the newest remaining backup.
-      var list = TimeMachineStore.snapshots
+      var list = BackItUpStore.snapshots
       if (list.length === 0) {
         root.snapshotId = ""
         return
@@ -326,18 +326,18 @@ FocusScope {
       Dropdown {
         width: (parent.width - Style.space(46)) / 2
         anchors.verticalCenter: parent.verticalCenter
-        visible: TimeMachineStore.destinations.length > 1
+        visible: BackItUpStore.destinations.length > 1
         label: ""
         showLabel: false
         foreground: root.foreground
         fontFamily: root.fontFamily
-        value: TimeMachineStore.browseName
+        value: BackItUpStore.browseName
         options: {
           var list = []
-          for (var i = 0; i < TimeMachineStore.destinations.length; i++) {
-            var d = TimeMachineStore.destinations[i]
+          for (var i = 0; i < BackItUpStore.destinations.length; i++) {
+            var d = BackItUpStore.destinations[i]
             list.push({ value: String(d.name),
-                        label: TimeMachineStore.destinationLabel(d) })
+                        label: BackItUpStore.destinationLabel(d) })
           }
           return list
         }
@@ -348,14 +348,14 @@ FocusScope {
           // offering them while the new snapshots load, and picking one asks
           // the CLI to list a path under no snapshot at all.
           root.snapshotRoots = []
-          TimeMachineStore.browseDestination(value)
+          BackItUpStore.browseDestination(value)
           root.takeFocus()
         }
         onPopupOpenChanged: if (!popupOpen) root.takeFocus()
       }
 
       Dropdown {
-        width: TimeMachineStore.destinations.length > 1
+        width: BackItUpStore.destinations.length > 1
                ? (parent.width - Style.space(46)) / 2
                : parent.width - Style.space(38)
         anchors.verticalCenter: parent.verticalCenter
@@ -366,9 +366,9 @@ FocusScope {
         value: root.snapshotId
         options: {
           var list = []
-          for (var i = 0; i < TimeMachineStore.snapshots.length; i++) {
-            var s = TimeMachineStore.snapshots[i]
-            list.push({ value: String(s.id), label: TimeMachineStore.shortDate(s.time) })
+          for (var i = 0; i < BackItUpStore.snapshots.length; i++) {
+            var s = BackItUpStore.snapshots[i]
+            list.push({ value: String(s.id), label: BackItUpStore.shortDate(s.time) })
           }
           return list
         }
@@ -429,11 +429,11 @@ FocusScope {
 
     Text {
       width: parent.width
-      visible: TimeMachineStore.snapshotsBusy || TimeMachineStore.snapshotsError !== ""
-      text: TimeMachineStore.snapshotsBusy ? "Loading snapshots…" : TimeMachineStore.snapshotsError
+      visible: BackItUpStore.snapshotsBusy || BackItUpStore.snapshotsError !== ""
+      text: BackItUpStore.snapshotsBusy ? "Loading snapshots…" : BackItUpStore.snapshotsError
       textFormat: Text.PlainText
       wrapMode: Text.WordWrap
-      color: TimeMachineStore.snapshotsError !== "" ? root.urgent : root.dim
+      color: BackItUpStore.snapshotsError !== "" ? root.urgent : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
     }
@@ -442,10 +442,10 @@ FocusScope {
 
     Text {
       width: parent.width
-      visible: TimeMachineStore.currentPath !== ""
+      visible: BackItUpStore.currentPath !== ""
                && (root.snapshotRoots.length <= 1
-                   || TimeMachineStore.currentPath !== root.rootPath)
-      text: TimeMachineStore.currentPath
+                   || BackItUpStore.currentPath !== root.rootPath)
+      text: BackItUpStore.currentPath
       textFormat: Text.PlainText
       elide: Text.ElideLeft
       color: root.dim
@@ -461,7 +461,7 @@ FocusScope {
       width: parent.width
       visible: text !== ""
       text: {
-        var total = TimeMachineStore.entries.length
+        var total = BackItUpStore.entries.length
         if (total === 0) return ""
         if (root.filter !== "")
           return "\u201C" + root.filter + "\u201D \u00b7 "
@@ -479,11 +479,11 @@ FocusScope {
 
     Text {
       width: parent.width
-      visible: TimeMachineStore.listBusy || TimeMachineStore.listError !== ""
-      text: TimeMachineStore.listBusy ? "Reading folder…" : TimeMachineStore.listError
+      visible: BackItUpStore.listBusy || BackItUpStore.listError !== ""
+      text: BackItUpStore.listBusy ? "Reading folder…" : BackItUpStore.listError
       textFormat: Text.PlainText
       wrapMode: Text.WordWrap
-      color: TimeMachineStore.listError !== "" ? root.urgent : root.dim
+      color: BackItUpStore.listError !== "" ? root.urgent : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
     }
@@ -491,7 +491,7 @@ FocusScope {
     Rectangle {
       width: parent.width
       height: Math.min(Style.space(300), Math.max(Style.space(60), listView.contentHeight + Style.space(4)))
-      visible: !TimeMachineStore.listBusy && TimeMachineStore.listError === ""
+      visible: !BackItUpStore.listBusy && BackItUpStore.listError === ""
       color: "transparent"
 
       ListView {
@@ -526,7 +526,7 @@ FocusScope {
 
     Text {
       width: parent.width
-      visible: TimeMachineStore.listTruncated
+      visible: BackItUpStore.listTruncated
       text: "Showing the first entries only — use the filter, or open a subfolder."
       textFormat: Text.PlainText
       wrapMode: Text.WordWrap
@@ -539,8 +539,8 @@ FocusScope {
       width: parent.width
       visible: text !== ""
       text: {
-        if (TimeMachineStore.listBusy || TimeMachineStore.listError !== "") return ""
-        if (TimeMachineStore.entries.length === 0)
+        if (BackItUpStore.listBusy || BackItUpStore.listError !== "") return ""
+        if (BackItUpStore.entries.length === 0)
           return root.atRoot ? "" : "This folder is empty in this snapshot."
         if (root.visibleEntries.length === 0) return "Nothing here matches the filter."
         return ""
@@ -564,7 +564,7 @@ FocusScope {
 
     MenuRow {
       width: parent.width
-      visible: root.selected !== null && !TimeMachineStore.restoreBusy
+      visible: root.selected !== null && !BackItUpStore.restoreBusy
       label: root.selected ? "Restore \u201C" + String(root.selected.name) + "\u201D" : ""
       foreground: root.foreground
       fontFamily: root.fontFamily
@@ -577,12 +577,12 @@ FocusScope {
 
     MenuRow {
       width: parent.width
-      visible: TimeMachineStore.currentPath !== "" && !TimeMachineStore.restoreBusy
+      visible: BackItUpStore.currentPath !== "" && !BackItUpStore.restoreBusy
       label: "Restore this folder (" + root.currentFolderName + ")"
       foreground: root.foreground
       fontFamily: root.fontFamily
       onClicked: {
-        root.restoreTargetPath = TimeMachineStore.currentPath
+        root.restoreTargetPath = BackItUpStore.currentPath
         root.restoreTargetName = root.currentFolderName
         restoreConfirm.opened = true
       }
@@ -590,7 +590,7 @@ FocusScope {
 
     Text {
       width: parent.width
-      visible: TimeMachineStore.restoreBusy
+      visible: BackItUpStore.restoreBusy
       topPadding: visible ? Style.space(6) : 0
       bottomPadding: visible ? Style.space(6) : 0
       text: "Restoring\u2026"
@@ -602,13 +602,13 @@ FocusScope {
 
     Text {
       width: parent.width
-      visible: TimeMachineStore.restoreTarget !== "" || TimeMachineStore.restoreError !== ""
-      text: TimeMachineStore.restoreError !== ""
-            ? TimeMachineStore.restoreError
-            : "Restored into " + TimeMachineStore.restoreTarget
+      visible: BackItUpStore.restoreTarget !== "" || BackItUpStore.restoreError !== ""
+      text: BackItUpStore.restoreError !== ""
+            ? BackItUpStore.restoreError
+            : "Restored into " + BackItUpStore.restoreTarget
       textFormat: Text.PlainText
       wrapMode: Text.WrapAnywhere
-      color: TimeMachineStore.restoreError !== "" ? root.urgent : root.dim
+      color: BackItUpStore.restoreError !== "" ? root.urgent : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
     }
@@ -625,7 +625,7 @@ FocusScope {
     // Qt's AutoText, which renders anything tag-shaped as rich text and would
     // fetch what it points at. Same reason the bar tooltip goes through plain().
     message: root.restoreTargetName !== ""
-             ? "Restore \u201C" + TimeMachineStore.plain(root.restoreTargetName)
+             ? "Restore \u201C" + BackItUpStore.plain(root.restoreTargetName)
                + "\u201D into ~/Restored? Nothing outside that folder is touched."
              : ""
     confirmText: "Restore"
